@@ -1,4 +1,5 @@
 #include "battle_runtime.h"
+#include "common_utils.h"
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <netdb.h>
@@ -29,24 +30,6 @@ namespace {
 constexpr uint32_t kReplayMagic = 0x50424C47;
 constexpr uint32_t kReplayVersion = 6;
 constexpr uint32_t kReplayChunkMagic = 0x43484E4B;  // CHNK
-
-bool contains_id(const std::vector<uint16_t>& values, uint16_t id) {
-    return std::find(values.begin(), values.end(), id) != values.end();
-}
-
-void add_unique_id(std::vector<uint16_t>* values, uint16_t id) {
-    if (values == nullptr || id == 0 || contains_id(*values, id)) {
-        return;
-    }
-    values->push_back(id);
-}
-
-void erase_id(std::vector<uint16_t>* values, uint16_t id) {
-    if (values == nullptr) {
-        return;
-    }
-    values->erase(std::remove(values->begin(), values->end(), id), values->end());
-}
 
 std::vector<char> rle_compress(const std::vector<char>& input) {
     std::vector<char> out;
@@ -112,17 +95,6 @@ bool validate_battle_model_dims(size_t input_dim, size_t output_dim, std::string
                          std::to_string(output_dim);
     }
     return false;
-}
-
-template <typename T>
-void write_binary(std::ofstream& out, const T& value) {
-    out.write(reinterpret_cast<const char*>(&value), sizeof(T));
-}
-
-template <typename T>
-bool read_binary(std::ifstream& in, T* value) {
-    in.read(reinterpret_cast<char*>(value), sizeof(T));
-    return static_cast<bool>(in);
 }
 
 int strategy_priority(Strategy strategy) {
@@ -196,22 +168,6 @@ const char* stance_to_string(sim::DiplomaticStance stance) {
         case sim::DiplomaticStance::Pacifist: return "pacifist";
     }
     return "neutral";
-}
-
-std::string json_escape(const std::string& value) {
-    std::string out;
-    out.reserve(value.size() + 16);
-    for (char c : value) {
-        switch (c) {
-            case '"': out += "\\\""; break;
-            case '\\': out += "\\\\"; break;
-            case '\n': out += "\\n"; break;
-            case '\r': out += "\\r"; break;
-            case '\t': out += "\\t"; break;
-            default: out += c; break;
-        }
-    }
-    return out;
 }
 
 std::string sanitize_wire(const std::string& value) {
@@ -934,13 +890,13 @@ void ModelManager::apply_decisions(sim::World& world, const std::vector<Decision
                 if (target == nullptr) {
                     return;
                 }
-                if (contains_id(actor->embargoed_country_ids, target_id) || contains_id(target->embargoed_country_ids, actor->id)) {
+                if (pallas::util::contains_id(actor->embargoed_country_ids, target_id) || pallas::util::contains_id(target->embargoed_country_ids, actor->id)) {
                     actor->civilian_morale = std::max(sim::Fixed::from_int(0), actor->civilian_morale - sim::Fixed::from_double(0.4));
                     return;
                 }
-                if (has_reciprocal_trade(decision.actor_country_id, target_id) || contains_id(target->trade_partners, actor->id)) {
-                    add_unique_id(&actor->trade_partners, target_id);
-                    add_unique_id(&target->trade_partners, actor->id);
+                if (has_reciprocal_trade(decision.actor_country_id, target_id) || pallas::util::contains_id(target->trade_partners, actor->id)) {
+                    pallas::util::add_unique_id(&actor->trade_partners, target_id);
+                    pallas::util::add_unique_id(&target->trade_partners, actor->id);
                     actor->trade_balance = std::min(sim::Fixed::from_int(100), actor->trade_balance + sim::Fixed::from_double(2.0));
                     target->trade_balance = std::min(sim::Fixed::from_int(100), target->trade_balance + sim::Fixed::from_double(1.4));
                     actor->economic_stability = std::min(sim::Fixed::from_int(100), actor->economic_stability + sim::Fixed::from_double(1.2));
@@ -956,11 +912,11 @@ void ModelManager::apply_decisions(sim::World& world, const std::vector<Decision
                     return;
                 }
                 sim::Country* target = find_country(world, target_id);
-                erase_id(&actor->trade_partners, target_id);
+                pallas::util::erase_id(&actor->trade_partners, target_id);
                 actor->trade_balance = std::max(sim::Fixed::from_int(-100), actor->trade_balance - sim::Fixed::from_double(1.5));
                 actor->economic_stability = std::max(sim::Fixed::from_int(0), actor->economic_stability - sim::Fixed::from_double(0.8));
                 if (target != nullptr) {
-                    erase_id(&target->trade_partners, actor->id);
+                    pallas::util::erase_id(&target->trade_partners, actor->id);
                     target->economic_stability = std::max(sim::Fixed::from_int(0), target->economic_stability - sim::Fixed::from_double(0.6));
                 }
                 break;
@@ -974,9 +930,9 @@ void ModelManager::apply_decisions(sim::World& world, const std::vector<Decision
                 if (target == nullptr) {
                     return;
                 }
-                add_unique_id(&actor->embargoed_country_ids, target_id);
-                erase_id(&actor->trade_partners, target_id);
-                erase_id(&target->trade_partners, actor->id);
+                pallas::util::add_unique_id(&actor->embargoed_country_ids, target_id);
+                pallas::util::erase_id(&actor->trade_partners, target_id);
+                pallas::util::erase_id(&target->trade_partners, actor->id);
                 actor->trade_balance = std::max(sim::Fixed::from_int(-100), actor->trade_balance - sim::Fixed::from_double(1.1));
                 target->trade_balance = std::max(sim::Fixed::from_int(-100), target->trade_balance - sim::Fixed::from_double(2.5));
                 actor->economic_stability = std::max(sim::Fixed::from_int(0), actor->economic_stability - sim::Fixed::from_double(0.5));
@@ -1050,8 +1006,8 @@ void ModelManager::apply_decisions(sim::World& world, const std::vector<Decision
                 if (target == nullptr || !has_reciprocal_defense(actor->id, target_id)) {
                     return;
                 }
-                add_unique_id(&actor->has_defense_pact_with, target_id);
-                add_unique_id(&target->has_defense_pact_with, actor->id);
+                pallas::util::add_unique_id(&actor->has_defense_pact_with, target_id);
+                pallas::util::add_unique_id(&target->has_defense_pact_with, actor->id);
                 actor->defense_pact_expiry_ticks[target_id] = world.current_tick() + 48;
                 target->defense_pact_expiry_ticks[actor->id] = world.current_tick() + 48;
                 actor->trust_scores[target_id] = std::min(sim::Fixed::from_int(100), actor->trust_scores[target_id] + sim::Fixed::from_double(4.0));
@@ -1065,8 +1021,8 @@ void ModelManager::apply_decisions(sim::World& world, const std::vector<Decision
                 if (target == nullptr || !has_reciprocal_non_aggression(actor->id, target_id)) {
                     return;
                 }
-                add_unique_id(&actor->has_non_aggression_with, target_id);
-                add_unique_id(&target->has_non_aggression_with, actor->id);
+                pallas::util::add_unique_id(&actor->has_non_aggression_with, target_id);
+                pallas::util::add_unique_id(&target->has_non_aggression_with, actor->id);
                 actor->non_aggression_expiry_ticks[target_id] = world.current_tick() + 24;
                 target->non_aggression_expiry_ticks[actor->id] = world.current_tick() + 24;
                 actor->trust_scores[target_id] = std::min(sim::Fixed::from_int(100), actor->trust_scores[target_id] + sim::Fixed::from_double(2.5));
@@ -1077,17 +1033,17 @@ void ModelManager::apply_decisions(sim::World& world, const std::vector<Decision
                 const uint16_t target_id = decision.target_country_id;
                 sim::Country* target = find_country(world, target_id);
                 actor->betrayal_tick_log.push_back(world.current_tick());
-                erase_id(&actor->has_defense_pact_with, target_id);
-                erase_id(&actor->has_non_aggression_with, target_id);
-                erase_id(&actor->has_trade_treaty_with, target_id);
+                pallas::util::erase_id(&actor->has_defense_pact_with, target_id);
+                pallas::util::erase_id(&actor->has_non_aggression_with, target_id);
+                pallas::util::erase_id(&actor->has_trade_treaty_with, target_id);
                 actor->defense_pact_expiry_ticks.erase(target_id);
                 actor->non_aggression_expiry_ticks.erase(target_id);
                 actor->trade_treaty_expiry_ticks.erase(target_id);
                 actor->reputation = std::max(sim::Fixed::from_int(0), actor->reputation - sim::Fixed::from_double(6.0));
                 if (target != nullptr) {
-                    erase_id(&target->has_defense_pact_with, actor->id);
-                    erase_id(&target->has_non_aggression_with, actor->id);
-                    erase_id(&target->has_trade_treaty_with, actor->id);
+                    pallas::util::erase_id(&target->has_defense_pact_with, actor->id);
+                    pallas::util::erase_id(&target->has_non_aggression_with, actor->id);
+                    pallas::util::erase_id(&target->has_trade_treaty_with, actor->id);
                     target->defense_pact_expiry_ticks.erase(actor->id);
                     target->non_aggression_expiry_ticks.erase(actor->id);
                     target->trade_treaty_expiry_ticks.erase(actor->id);
@@ -1571,8 +1527,8 @@ bool ReplayLogger::open(const std::string& path) {
         return false;
     }
     chunk_buffer_.clear();
-    write_binary(out_, kReplayMagic);
-    write_binary(out_, kReplayVersion);
+    pallas::util::write_binary(out_, kReplayMagic);
+    pallas::util::write_binary(out_, kReplayVersion);
     return static_cast<bool>(out_);
 }
 
@@ -1746,11 +1702,11 @@ bool ReplayLogger::flush_chunk() {
     const uint8_t header_version = 1;
     const uint32_t raw_size = static_cast<uint32_t>(chunk_buffer_.size());
     const uint32_t payload_size = static_cast<uint32_t>(payload.size());
-    write_binary(out_, magic);
-    write_binary(out_, header_version);
-    write_binary(out_, codec);
-    write_binary(out_, raw_size);
-    write_binary(out_, payload_size);
+    pallas::util::write_binary(out_, magic);
+    pallas::util::write_binary(out_, header_version);
+    pallas::util::write_binary(out_, codec);
+    pallas::util::write_binary(out_, raw_size);
+    pallas::util::write_binary(out_, payload_size);
     if (payload_size > 0) {
         out_.write(payload.data(), static_cast<std::streamsize>(payload_size));
     }
@@ -1772,7 +1728,7 @@ bool ReplayReader::open(const std::string& path) {
 
     uint32_t magic = 0;
     uint32_t version = 0;
-    if (!read_binary(in_, &magic) || !read_binary(in_, &version)) {
+    if (!pallas::util::read_binary(in_, &magic) || !pallas::util::read_binary(in_, &version)) {
         return false;
     }
     if (magic != kReplayMagic) {
@@ -1832,13 +1788,13 @@ bool ReplayReader::fill_next_chunk() {
     uint8_t codec = 0;
     uint32_t raw_size = 0;
     uint32_t payload_size = 0;
-    if (!read_binary(in_, &magic)) {
+    if (!pallas::util::read_binary(in_, &magic)) {
         return false;
     }
-    if (!read_binary(in_, &header_version) ||
-        !read_binary(in_, &codec) ||
-        !read_binary(in_, &raw_size) ||
-        !read_binary(in_, &payload_size)) {
+    if (!pallas::util::read_binary(in_, &header_version) ||
+        !pallas::util::read_binary(in_, &codec) ||
+        !pallas::util::read_binary(in_, &raw_size) ||
+        !pallas::util::read_binary(in_, &payload_size)) {
         return false;
     }
     if (magic != kReplayChunkMagic || header_version != 1) {
@@ -2030,7 +1986,7 @@ bool ReplayReader::is_open() const {
 
 bool ReplayReader::read_string(std::string* out) {
     uint32_t len = 0;
-    if (!read_binary(in_, &len)) {
+    if (!pallas::util::read_binary(in_, &len)) {
         return false;
     }
     out->assign(len, '\0');
@@ -2446,7 +2402,7 @@ std::string BattleEngine::available_models_json() const {
         if (i > 0) {
             oss << ',';
         }
-        oss << "\"" << json_escape(names[i]) << "\"";
+        oss << "\"" << pallas::util::json_escape(names[i]) << "\"";
     }
     oss << "],";
 
@@ -2463,10 +2419,10 @@ std::string BattleEngine::available_models_json() const {
         }
         oss << "{";
         oss << "\"country_id\":" << country.id << ',';
-        oss << "\"country_name\":\"" << json_escape(country.name) << "\",";
-        oss << "\"team\":\"" << json_escape(model_manager_.team_for_country(country.id)) << "\",";
-        oss << "\"slot_model\":\"" << json_escape(model_manager_.model_slot_for_country(country.id)) << "\",";
-        oss << "\"selected_model\":\"" << json_escape(model_manager_.model_for_country(country.id)) << "\",";
+        oss << "\"country_name\":\"" << pallas::util::json_escape(country.name) << "\",";
+        oss << "\"team\":\"" << pallas::util::json_escape(model_manager_.team_for_country(country.id)) << "\",";
+        oss << "\"slot_model\":\"" << pallas::util::json_escape(model_manager_.model_slot_for_country(country.id)) << "\",";
+        oss << "\"selected_model\":\"" << pallas::util::json_escape(model_manager_.model_for_country(country.id)) << "\",";
         oss << "\"loaded\":" << (loaded ? "true" : "false");
         oss << "}";
     }
@@ -2479,12 +2435,12 @@ std::string BattleEngine::available_models_json() const {
             oss << ',';
         }
         first_team = false;
-        oss << "\"" << json_escape(kv.first) << "\":[";
+        oss << "\"" << pallas::util::json_escape(kv.first) << "\":[";
         for (size_t i = 0; i < kv.second.size(); ++i) {
             if (i > 0) {
                 oss << ',';
             }
-            oss << "\"" << json_escape(kv.second[i]) << "\"";
+            oss << "\"" << pallas::util::json_escape(kv.second[i]) << "\"";
         }
         oss << "]";
     }
@@ -2497,7 +2453,7 @@ std::string BattleEngine::available_models_json() const {
             oss << ',';
         }
         first_upload_team = false;
-        oss << "\"" << json_escape(kv.first) << "\":[";
+        oss << "\"" << pallas::util::json_escape(kv.first) << "\":[";
         std::set<std::string> unique_uploads;
         for (const std::string& name : kv.second) {
             if (!name.empty()) {
@@ -2510,7 +2466,7 @@ std::string BattleEngine::available_models_json() const {
             if (i > 0) {
                 oss << ',';
             }
-            oss << "\"" << json_escape(name) << "\"";
+            oss << "\"" << pallas::util::json_escape(name) << "\"";
             ++i;
         }
         oss << "]";
@@ -2534,7 +2490,7 @@ std::string BattleEngine::available_models_json() const {
         if (i > 0) {
             oss << ',';
         }
-        oss << "\"" << json_escape(model_load_errors_[i]) << "\"";
+        oss << "\"" << pallas::util::json_escape(model_load_errors_[i]) << "\"";
     }
     oss << "]";
 
@@ -2624,9 +2580,9 @@ std::string BattleEngine::current_state_json() const {
         }
         oss << "{";
         oss << "\"id\":" << c.id << ',';
-        oss << "\"name\":\"" << json_escape(c.name) << "\",";
-        oss << "\"color\":\"" << json_escape(c.color) << "\",";
-        oss << "\"team\":\"" << json_escape(model_manager_.team_for_country(c.id)) << "\",";
+        oss << "\"name\":\"" << pallas::util::json_escape(c.name) << "\",";
+        oss << "\"color\":\"" << pallas::util::json_escape(c.color) << "\",";
+        oss << "\"team\":\"" << pallas::util::json_escape(model_manager_.team_for_country(c.id)) << "\",";
         oss << "\"population\":" << c.population << ',';
         oss << "\"units\":{";
         oss << "\"infantry\":" << c.military.units_infantry.raw() << ',';
@@ -2731,10 +2687,10 @@ std::string BattleEngine::current_state_json() const {
             oss << ',';
         }
         oss << "{";
-        oss << "\"from\":\"" << json_escape(m.from_model) << "\",";
-        oss << "\"to\":\"" << json_escape(m.to_model) << "\",";
-        oss << "\"channel\":\"" << json_escape(m.channel) << "\",";
-        oss << "\"content\":\"" << json_escape(m.content) << "\"";
+        oss << "\"from\":\"" << pallas::util::json_escape(m.from_model) << "\",";
+        oss << "\"to\":\"" << pallas::util::json_escape(m.to_model) << "\",";
+        oss << "\"channel\":\"" << pallas::util::json_escape(m.channel) << "\",";
+        oss << "\"content\":\"" << pallas::util::json_escape(m.content) << "\"";
         oss << "}";
     }
     oss << "],";
@@ -2742,7 +2698,7 @@ std::string BattleEngine::current_state_json() const {
     oss << "\"distributed\":{";
     oss << "\"node_id\":" << distributed_config_.node_id << ',';
     oss << "\"total_nodes\":" << std::max<uint32_t>(1U, distributed_config_.total_nodes) << ',';
-    oss << "\"bind_host\":\"" << json_escape(distributed_config_.bind_host) << "\",";
+    oss << "\"bind_host\":\"" << pallas::util::json_escape(distributed_config_.bind_host) << "\",";
     oss << "\"bind_port\":" << distributed_config_.bind_port;
     oss << "},";
 
@@ -2752,7 +2708,7 @@ std::string BattleEngine::current_state_json() const {
         if (i > 0) {
             oss << ',';
         }
-        oss << "\"" << json_escape(finalist_models_[i]) << "\"";
+        oss << "\"" << pallas::util::json_escape(finalist_models_[i]) << "\"";
     }
     oss << "],";
     oss << "\"eliminated\":[";
@@ -2761,12 +2717,12 @@ std::string BattleEngine::current_state_json() const {
         if (elim_count++ > 0) {
             oss << ',';
         }
-        oss << "\"" << json_escape(name) << "\"";
+        oss << "\"" << pallas::util::json_escape(name) << "\"";
     }
     oss << "],";
-    oss << "\"winner_model\":\"" << json_escape(winner_model_) << "\",";
+    oss << "\"winner_model\":\"" << pallas::util::json_escape(winner_model_) << "\",";
     oss << "\"winner_country_id\":" << winner_country_id_ << ',';
-    oss << "\"winner_country_name\":\"" << json_escape(winner_country_name_) << "\"";
+    oss << "\"winner_country_name\":\"" << pallas::util::json_escape(winner_country_name_) << "\"";
     oss << "},";
 
     oss << "\"model_load_errors\":[";
@@ -2774,7 +2730,7 @@ std::string BattleEngine::current_state_json() const {
         if (i > 0) {
             oss << ',';
         }
-        oss << "\"" << json_escape(model_load_errors_[i]) << "\"";
+        oss << "\"" << pallas::util::json_escape(model_load_errors_[i]) << "\"";
     }
     oss << "],";
 
@@ -2785,23 +2741,23 @@ std::string BattleEngine::current_state_json() const {
             oss << ',';
         }
         oss << "{";
-        oss << "\"model\":\"" << json_escape(d.model_name) << "\",";
-        oss << "\"team\":\"" << json_escape(d.team) << "\",";
+        oss << "\"model\":\"" << pallas::util::json_escape(d.model_name) << "\",";
+        oss << "\"team\":\"" << pallas::util::json_escape(d.team) << "\",";
         oss << "\"actor_country_id\":" << d.decision.actor_country_id << ',';
         oss << "\"target_country_id\":" << d.decision.target_country_id << ',';
         oss << "\"strategy\":\"" << strategy_to_string(d.decision.strategy) << "\",";
         oss << "\"force_commitment\":" << d.decision.force_commitment << ',';
         oss << "\"terms\":{"
-            << "\"type\":\"" << json_escape(d.decision.terms.type) << "\",";
-        oss << "\"details\":\"" << json_escape(d.decision.terms.details) << "\"},";
+            << "\"type\":\"" << pallas::util::json_escape(d.decision.terms.type) << "\",";
+        oss << "\"details\":\"" << pallas::util::json_escape(d.decision.terms.details) << "\"},";
         oss << "\"has_secondary_action\":" << (d.decision.has_secondary_action ? "true" : "false") << ',';
         oss << "\"secondary_action\":{";
         oss << "\"strategy\":\"" << strategy_to_string(d.decision.secondary_action.strategy) << "\",";
         oss << "\"target_country_id\":" << d.decision.secondary_action.target_country_id << ',';
         oss << "\"commitment\":" << d.decision.secondary_action.commitment << ',';
         oss << "\"terms\":{";
-        oss << "\"type\":\"" << json_escape(d.decision.secondary_action.terms.type) << "\",";
-        oss << "\"details\":\"" << json_escape(d.decision.secondary_action.terms.details) << "\"}}";
+        oss << "\"type\":\"" << pallas::util::json_escape(d.decision.secondary_action.terms.type) << "\",";
+        oss << "\"details\":\"" << pallas::util::json_escape(d.decision.secondary_action.terms.details) << "\"}}";
         oss << "}";
     }
     oss << "],";
@@ -2922,10 +2878,10 @@ std::string BattleEngine::current_leaderboard_json() const {
             winner_country_name = fallback_country_name;
         }
 
-        oss << "\"winner_model\":\"" << json_escape(rows[0].model) << "\",";
-        oss << "\"winner_team\":\"" << json_escape(rows[0].team) << "\",";
+        oss << "\"winner_model\":\"" << pallas::util::json_escape(rows[0].model) << "\",";
+        oss << "\"winner_team\":\"" << pallas::util::json_escape(rows[0].team) << "\",";
         oss << "\"winner_country_id\":" << winner_country_id << ",";
-        oss << "\"winner_country_name\":\"" << json_escape(winner_country_name) << "\",";
+        oss << "\"winner_country_name\":\"" << pallas::util::json_escape(winner_country_name) << "\",";
     }
     oss << "\"leaderboard\":[";
     for (size_t i = 0; i < rows.size(); ++i) {
@@ -2934,8 +2890,8 @@ std::string BattleEngine::current_leaderboard_json() const {
         }
         oss << "{";
         oss << "\"rank\":" << (i + 1) << ',';
-        oss << "\"model\":\"" << json_escape(rows[i].model) << "\",";
-        oss << "\"team\":\"" << json_escape(rows[i].team) << "\",";
+        oss << "\"model\":\"" << pallas::util::json_escape(rows[i].model) << "\",";
+        oss << "\"team\":\"" << pallas::util::json_escape(rows[i].team) << "\",";
         oss << "\"score\":" << std::llround(rows[i].score);
         oss << "}";
     }
@@ -2958,7 +2914,7 @@ std::string BattleEngine::current_diagnostics_json() const {
     oss << "\"distributed\":{";
     oss << "\"node_id\":" << distributed_config_.node_id << ',';
     oss << "\"total_nodes\":" << std::max<uint32_t>(1U, distributed_config_.total_nodes) << ',';
-    oss << "\"bind_host\":\"" << json_escape(distributed_config_.bind_host) << "\",";
+    oss << "\"bind_host\":\"" << pallas::util::json_escape(distributed_config_.bind_host) << "\",";
     oss << "\"bind_port\":" << distributed_config_.bind_port << ',';
     oss << "\"peer_count\":" << bus_stats.peer_count << ',';
     oss << "\"exchange_count\":" << bus_stats.exchange_count << ',';

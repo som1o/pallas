@@ -22,8 +22,8 @@ public:
     void softmax();
 };
 
-float cross_entropy(const Tensor& logits, int target);
-Tensor grad_cross_entropy(const Tensor& logits, int target);
+float cross_entropy(const Tensor& logits, uint32_t target);
+Tensor grad_cross_entropy(const Tensor& logits, uint32_t target);
 float cross_entropy_advanced(const Tensor& logits, uint32_t target, float label_smoothing, float target_weight);
 Tensor grad_cross_entropy_advanced(const Tensor& logits, uint32_t target, float label_smoothing, float target_weight);
 bool top_k_hit(const Tensor& logits, uint32_t target, size_t k);

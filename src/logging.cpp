@@ -1,5 +1,7 @@
 #include "logging.h"
 
+#include "common_utils.h"
+
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -13,29 +15,6 @@ namespace {
 std::mutex g_mu;
 std::ofstream g_file;
 bool g_ready = false;
-
-std::string json_escape(const std::string& input) {
-    std::string out;
-    out.reserve(input.size() + 16);
-    for (char c : input) {
-        switch (c) {
-            case '"': out += "\\\""; break;
-            case '\\': out += "\\\\"; break;
-            case '\b': out += "\\b"; break;
-            case '\f': out += "\\f"; break;
-            case '\n': out += "\\n"; break;
-            case '\r': out += "\\r"; break;
-            case '\t': out += "\\t"; break;
-            default:
-                if (static_cast<unsigned char>(c) < 0x20) {
-                    out += "?";
-                } else {
-                    out += c;
-                }
-        }
-    }
-    return out;
-}
 
 std::string now_iso8601_utc() {
     using clock = std::chrono::system_clock;
@@ -52,14 +31,14 @@ std::string now_iso8601_utc() {
     return oss.str();
 }
 
-const char* level_name(spdlog::level::level_enum level) {
+const char* level_name(logging::Level level) {
     switch (level) {
-        case spdlog::level::trace: return "trace";
-        case spdlog::level::debug: return "debug";
-        case spdlog::level::info: return "info";
-        case spdlog::level::warn: return "warn";
-        case spdlog::level::err: return "error";
-        case spdlog::level::critical: return "critical";
+        case logging::Level::Trace: return "trace";
+        case logging::Level::Debug: return "debug";
+        case logging::Level::Info: return "info";
+        case logging::Level::Warn: return "warn";
+        case logging::Level::Error: return "error";
+        case logging::Level::Critical: return "critical";
         default: return "info";
     }
 }
@@ -70,13 +49,18 @@ namespace logging {
 
 bool init_logging(const std::string& log_dir, const std::string& app_name) {
     std::lock_guard<std::mutex> lock(g_mu);
+    g_ready = false;
     try {
         std::filesystem::create_directories(log_dir);
         const std::string log_path = log_dir + "/" + app_name + ".log";
+        if (g_file.is_open()) {
+            g_file.close();
+        }
         g_file.open(log_path, std::ios::out | std::ios::app);
         g_ready = static_cast<bool>(g_file);
-        return true;
+        return g_ready;
     } catch (...) {
+        g_ready = false;
         return false;
     }
 }
@@ -89,7 +73,7 @@ void flush() {
     }
 }
 
-void log_event(spdlog::level::level_enum level,
+void log_event(Level level,
                const std::string& event,
                const std::vector<std::pair<std::string, std::string>>& fields) {
     if (!g_ready) {
@@ -100,10 +84,11 @@ void log_event(spdlog::level::level_enum level,
     oss << "{"
         << "\"ts\":\"" << now_iso8601_utc() << "\"," 
         << "\"level\":\"" << level_name(level) << "\"," 
-        << "\"event\":\"" << json_escape(event) << "\"";
+        << "\"event\":\"" << pallas::util::json_escape(event) << "\"";
 
     for (const auto& kv : fields) {
-        oss << ",\"" << json_escape(kv.first) << "\":\"" << json_escape(kv.second) << "\"";
+        oss << ",\"" << pallas::util::json_escape(kv.first) << "\":\""
+            << pallas::util::json_escape(kv.second) << "\"";
     }
     oss << "}";
     const std::string line = oss.str();

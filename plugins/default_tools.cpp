@@ -7,7 +7,7 @@ void attack_tool(const PluginToolContextV1* ctx) {
     const char* sector = (ctx == nullptr || ctx->sector == nullptr) ? "" : ctx->sector;
     const char* action = (ctx == nullptr || ctx->action == nullptr) ? "" : ctx->action;
     const int priority = (ctx == nullptr) ? 0 : ctx->priority;
-    logging::log_event(spdlog::level::info, "plugin_attack", {
+    logging::log_event(logging::Level::Info, "plugin_attack", {
         {"sector", sector},
         {"action", action},
         {"priority", std::to_string(priority)}
@@ -18,7 +18,7 @@ void defend_tool(const PluginToolContextV1* ctx) {
     const char* sector = (ctx == nullptr || ctx->sector == nullptr) ? "" : ctx->sector;
     const char* action = (ctx == nullptr || ctx->action == nullptr) ? "" : ctx->action;
     const int priority = (ctx == nullptr) ? 0 : ctx->priority;
-    logging::log_event(spdlog::level::info, "plugin_defend", {
+    logging::log_event(logging::Level::Info, "plugin_defend", {
         {"sector", sector},
         {"action", action},
         {"priority", std::to_string(priority)}
@@ -29,7 +29,7 @@ void retreat_tool(const PluginToolContextV1* ctx) {
     const char* sector = (ctx == nullptr || ctx->sector == nullptr) ? "" : ctx->sector;
     const char* action = (ctx == nullptr || ctx->action == nullptr) ? "" : ctx->action;
     const int priority = (ctx == nullptr) ? 0 : ctx->priority;
-    logging::log_event(spdlog::level::info, "plugin_retreat", {
+    logging::log_event(logging::Level::Info, "plugin_retreat", {
         {"sector", sector},
         {"action", action},
         {"priority", std::to_string(priority)}

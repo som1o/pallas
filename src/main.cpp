@@ -10,6 +10,7 @@
 #include <chrono>
 #include <cmath>
 #include <csignal>
+#include <cstdlib>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
@@ -44,6 +45,7 @@ struct CliOptions {
     std::string resume_path = "../data/best_state.bin";
     std::string model_zoo_dir = "../data/model_zoo";
     std::string log_dir = "../logs";
+    std::string data_dir = "../data";
     std::string inspect_model_path;
 };
 
@@ -66,6 +68,13 @@ CliOptions parse_cli(int argc, char** argv) {
             cli.log_dir = argv[++i];
         } else if (arg == "--inspect-model" && i + 1 < argc) {
             cli.inspect_model_path = argv[++i];
+        } else if (arg == "--data-dir" && i + 1 < argc) {
+            cli.data_dir = argv[++i];
+        }
+    }
+    if (const char* env_data = std::getenv("PALLAS_DATA_DIR")) {
+        if (*env_data != '\0') {
+            cli.data_dir = env_data;
         }
     }
     return cli;
@@ -262,8 +271,8 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    const std::string config_path = "../data/model_config.json";
-    const std::string train_config_path = "../data/train_config.json";
+    const std::string config_path = cli.data_dir + "/model_config.json";
+    const std::string train_config_path = cli.data_dir + "/train_config.json";
 
     {
         std::ifstream model_in(config_path);
@@ -288,19 +297,19 @@ int main(int argc, char** argv) {
 
     std::string err;
     if (!validate_model_config(model_config, err)) {
-        logging::log_event(spdlog::level::err, "model_config_invalid", {{"error", err}});
+        logging::log_event(logging::Level::Error, "model_config_invalid", {{"error", err}});
         return 1;
     }
     if (!validate_train_config(train_config, err)) {
-        logging::log_event(spdlog::level::err, "train_config_invalid", {{"error", err}});
+        logging::log_event(logging::Level::Error, "train_config_invalid", {{"error", err}});
         return 1;
     }
 
     std::vector<BattleSample> samples;
-    BattleDatasetConfig dataset_cfg;
+    BattleDatasetConfig dataset_cfg = make_battle_dataset_config(cli.data_dir);
     try {
         const BattleDatasetInfo info = prepare_battle_dataset(dataset_cfg, samples, cli.rebuild_battle_data);
-        logging::log_event(spdlog::level::info, "battle_dataset_ready", {
+        logging::log_event(logging::Level::Info, "battle_dataset_ready", {
             {"sample_count", std::to_string(info.sample_count)},
             {"rebuilt", info.rebuilt ? "true" : "false"},
             {"json_path", info.json_path},
@@ -315,12 +324,12 @@ int main(int argc, char** argv) {
         std::cout << "txt: " << info.txt_path << "\n";
         std::cout << "vocab: " << info.vocab_path << "\n";
     } catch (const std::exception& ex) {
-        logging::log_event(spdlog::level::err, "battle_data_prepare_failed", {{"error", ex.what()}});
+        logging::log_event(logging::Level::Error, "battle_data_prepare_failed", {{"error", ex.what()}});
         return 1;
     }
 
     if (samples.size() < 8) {
-        logging::log_event(spdlog::level::err, "battle_dataset_too_small", {{"sample_count", std::to_string(samples.size())}});
+        logging::log_event(logging::Level::Error, "battle_dataset_too_small", {{"sample_count", std::to_string(samples.size())}});
         return 1;
     }
 
@@ -366,7 +375,7 @@ int main(int argc, char** argv) {
                               battle_common::kBattleInputDim,
                               battle_common::kBattleOutputDim,
                               &file_info)) {
-            logging::log_event(spdlog::level::err, "resume_failed", {{"path", cli.resume_path}});
+            logging::log_event(logging::Level::Error, "resume_failed", {{"path", cli.resume_path}});
             return 1;
         }
     }
@@ -501,7 +510,7 @@ int main(int argc, char** argv) {
 
         Metrics val_metrics = evaluate_validation(model, val_loader, train_config, class_weights);
 
-        logging::log_event(spdlog::level::info, "battle_epoch_complete", {
+        logging::log_event(logging::Level::Info, "battle_epoch_complete", {
             {"epoch", std::to_string(epoch)},
             {"lr", std::to_string(lr)},
             {"train_loss", std::to_string(train_metrics.loss)},
@@ -542,7 +551,7 @@ int main(int argc, char** argv) {
         } else {
             ++epochs_without_improve;
             if (epochs_without_improve >= train_config.early_stopping_patience) {
-                logging::log_event(spdlog::level::info, "battle_early_stopping", {{"epoch", std::to_string(epoch)}});
+                logging::log_event(logging::Level::Info, "battle_early_stopping", {{"epoch", std::to_string(epoch)}});
                 break;
             }
         }

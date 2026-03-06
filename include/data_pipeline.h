@@ -10,6 +10,7 @@
 #include <vector>
 
 struct BattleDatasetConfig {
+    std::string data_root = "../data";
     std::string json_path = "../data/battle_train.json";
     std::string txt_path = "../data/battle_train.txt";
     std::string vocab_path = "../data/vocab.txt";
@@ -37,5 +38,7 @@ struct BattleDatasetInfo {
 BattleDatasetInfo prepare_battle_dataset(const BattleDatasetConfig& config,
                                          std::vector<BattleSample>& samples,
                                          bool force_rebuild);
+
+BattleDatasetConfig make_battle_dataset_config(const std::string& data_root);
 
 #endif

@@ -1,4 +1,5 @@
 #include "data_pipeline.h"
+#include "strategy_utils.h"
 
 #include <algorithm>
 #include <array>
@@ -105,34 +106,7 @@ uint32_t action_from_json(const nlohmann::json& value) {
         return battle_common::kActionDefend;
     }
 
-    const std::string s = value.get<std::string>();
-    if (s == "attack") return battle_common::kActionAttack;
-    if (s == "defend") return battle_common::kActionDefend;
-    if (s == "negotiate") return battle_common::kActionNegotiate;
-    if (s == "surrender") return battle_common::kActionSurrender;
-    if (s == "transfer_weapons") return battle_common::kActionTransferWeapons;
-    if (s == "focus_economy") return battle_common::kActionFocusEconomy;
-    if (s == "develop_technology") return battle_common::kActionDevelopTechnology;
-    if (s == "form_alliance") return battle_common::kActionFormAlliance;
-    if (s == "betray") return battle_common::kActionBetray;
-    if (s == "cyber_operation") return battle_common::kActionCyberOperation;
-    if (s == "sign_trade_agreement") return battle_common::kActionSignTradeAgreement;
-    if (s == "cancel_trade_agreement") return battle_common::kActionCancelTradeAgreement;
-    if (s == "impose_embargo") return battle_common::kActionImposeEmbargo;
-    if (s == "invest_in_resource_extraction") return battle_common::kActionInvestInResourceExtraction;
-    if (s == "reduce_military_upkeep") return battle_common::kActionReduceMilitaryUpkeep;
-    if (s == "suppress_dissent") return battle_common::kActionSuppressDissent;
-    if (s == "hold_elections") return battle_common::kActionHoldElections;
-    if (s == "coup_attempt") return battle_common::kActionCoupAttempt;
-    if (s == "propose_defense_pact") return battle_common::kActionProposeDefensePact;
-    if (s == "propose_non_aggression") return battle_common::kActionProposeNonAggression;
-    if (s == "break_treaty") return battle_common::kActionBreakTreaty;
-    if (s == "request_intel") return battle_common::kActionRequestIntel;
-    if (s == "deploy_units") return battle_common::kActionDeployUnits;
-    if (s == "tactical_nuke") return battle_common::kActionTacticalNuke;
-    if (s == "strategic_nuke") return battle_common::kActionStrategicNuke;
-    if (s == "cyber_attack") return battle_common::kActionCyberAttack;
-    return battle_common::kActionDefend;
+    return pallas::strategy::action_from_string(value.get<std::string>());
 }
 
 struct ClusterProfile {
@@ -795,4 +769,13 @@ BattleDatasetInfo prepare_battle_dataset(const BattleDatasetConfig& config,
     info.txt_path = config.txt_path;
     info.vocab_path = config.vocab_path;
     return info;
+}
+
+BattleDatasetConfig make_battle_dataset_config(const std::string& data_root) {
+    BattleDatasetConfig config;
+    config.data_root = data_root;
+    config.json_path = data_root + "/battle_train.json";
+    config.txt_path = data_root + "/battle_train.txt";
+    config.vocab_path = data_root + "/vocab.txt";
+    return config;
 }

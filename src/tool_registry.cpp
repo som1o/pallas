@@ -83,7 +83,7 @@ size_t ToolRegistry::load_plugins_from_directory(const std::string& directory_pa
         void* handle = dlopen(path.c_str(), RTLD_NOW);
         if (handle == nullptr) {
             const char* err = dlerror();
-            logging::log_event(spdlog::level::err, "plugin_load_failed", {
+            logging::log_event(logging::Level::Error, "plugin_load_failed", {
                 {"path", path},
                 {"error", err == nullptr ? "unknown" : std::string(err)}
             });
@@ -94,7 +94,7 @@ size_t ToolRegistry::load_plugins_from_directory(const std::string& directory_pa
         auto fn = reinterpret_cast<RegisterPluginToolsFnV1>(dlsym(handle, "register_plugin_tools_v1"));
         const char* sym_err = dlerror();
         if (sym_err != nullptr || fn == nullptr) {
-            logging::log_event(spdlog::level::err, "plugin_symbol_missing", {
+            logging::log_event(logging::Level::Error, "plugin_symbol_missing", {
                 {"path", path}
             });
             dlclose(handle);
@@ -102,7 +102,7 @@ size_t ToolRegistry::load_plugins_from_directory(const std::string& directory_pa
         }
 
         if (!fn(&ToolRegistry::register_from_plugin, this)) {
-            logging::log_event(spdlog::level::err, "plugin_registration_failed", {
+            logging::log_event(logging::Level::Error, "plugin_registration_failed", {
                 {"path", path}
             });
             dlclose(handle);

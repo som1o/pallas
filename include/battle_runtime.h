@@ -1,6 +1,7 @@
 #ifndef BATTLE_RUNTIME_H
 #define BATTLE_RUNTIME_H
 
+#include "country_state_common.h"
 #include "model.h"
 #include "simulation_engine.h"
 
@@ -45,50 +46,9 @@ struct DiplomaticMessage {
     std::string content;
 };
 
-struct ReplayCountryState {
-    uint16_t id = 0;
+struct ReplayCountryState : public CountryStateCommon {
     std::string name;
-    std::string color;
-    uint64_t population = 0;
-    int64_t units_infantry_milli = 0;
-    int64_t units_armor_milli = 0;
-    int64_t units_artillery_milli = 0;
-    int64_t units_air_fighter_milli = 0;
-    int64_t units_air_bomber_milli = 0;
-    int64_t units_naval_surface_milli = 0;
-    int64_t units_naval_submarine_milli = 0;
-    int64_t economic_stability_milli = 0;
-    int64_t civilian_morale_milli = 0;
-    int64_t logistics_milli = 0;
-    int64_t intelligence_milli = 0;
-    int64_t industry_milli = 0;
-    int64_t technology_milli = 0;
-    int64_t resource_reserve_milli = 0;
-    int64_t supply_level_milli = 0;
-    int64_t supply_capacity_milli = 0;
-    int64_t trade_balance_milli = 0;
-    std::vector<uint16_t> trade_partner_ids;
-    std::vector<uint16_t> defense_pact_ids;
-    std::vector<uint16_t> non_aggression_pact_ids;
-    std::vector<uint16_t> trade_treaty_ids;
-    int64_t resource_oil_reserves_milli = 0;
-    int64_t resource_minerals_reserves_milli = 0;
-    int64_t resource_food_reserves_milli = 0;
-    int64_t resource_rare_earth_reserves_milli = 0;
-    int64_t military_upkeep_milli = 0;
-    int64_t faction_military_milli = 0;
-    int64_t faction_industrial_milli = 0;
-    int64_t faction_civilian_milli = 0;
-    int64_t coup_risk_milli = 0;
-    int32_t election_cycle = 0;
-    int64_t draft_level_milli = 0;
-    int64_t war_weariness_milli = 0;
-    int64_t reputation_milli = 0;
-    int64_t escalation_level_milli = 0;
-    int32_t recent_betrayals = 0;
     int64_t strategic_depth_milli = 0;
-    uint8_t diplomatic_stance = 1;
-    bool second_strike_capable = false;
     uint32_t territory_cells = 0;
     std::string team;
 };

@@ -22,50 +22,44 @@ FetchContent_MakeAvailable(nlohmann_json)
 
 include_directories(include)
 
-add_executable(pallas
-    src/main.cpp
-    src/data_pipeline.cpp
-    src/dataloader.cpp
+add_library(pallas_core STATIC
     src/train_config.cpp
     src/tensor.cpp
     src/linear.cpp
     src/model.cpp
     src/logging.cpp
     src/simulation_engine.cpp
+    src/battle_runtime.cpp
+    src/scenario_config.cpp
+    src/data_pipeline.cpp
+    src/dataloader.cpp
+    src/common_utils.cpp
+    src/strategy_utils.cpp
+)
+target_link_libraries(pallas_core PUBLIC OpenMP::OpenMP_CXX Threads::Threads nlohmann_json::nlohmann_json)
+
+add_executable(pallas
+    src/main.cpp
 )
 
-target_link_libraries(pallas OpenMP::OpenMP_CXX Threads::Threads dl)
-target_link_libraries(pallas nlohmann_json::nlohmann_json)
+target_link_libraries(pallas pallas_core dl)
 
 add_executable(pallas_battle
     src/battle_main.cpp
-    src/battle_runtime.cpp
     src/battle_server.cpp
-    src/scenario_config.cpp
     src/tournament.cpp
-    src/simulation_engine.cpp
-    src/model.cpp
-    src/linear.cpp
-    src/tensor.cpp
 )
-target_link_libraries(pallas_battle OpenMP::OpenMP_CXX Threads::Threads)
-target_link_libraries(pallas_battle nlohmann_json::nlohmann_json)
+target_link_libraries(pallas_battle pallas_core)
 
 add_executable(pallas_replay
     src/replay_main.cpp
-    src/battle_runtime.cpp
-    src/scenario_config.cpp
-    src/simulation_engine.cpp
-    src/model.cpp
-    src/linear.cpp
-    src/tensor.cpp
 )
-target_link_libraries(pallas_replay OpenMP::OpenMP_CXX Threads::Threads)
-target_link_libraries(pallas_replay nlohmann_json::nlohmann_json)
+target_link_libraries(pallas_replay pallas_core)
 
 add_library(default_tools_plugin SHARED
     plugins/default_tools.cpp
     src/logging.cpp
+    src/common_utils.cpp
 )
 set_target_properties(default_tools_plugin PROPERTIES
     PREFIX ""
@@ -74,13 +68,6 @@ set_target_properties(default_tools_plugin PROPERTIES
 
 add_executable(pallas_tests
     tests/model_tests.cpp
-    src/train_config.cpp
-    src/tensor.cpp
-    src/linear.cpp
-    src/model.cpp
-    src/simulation_engine.cpp
-    src/battle_runtime.cpp
 )
-target_link_libraries(pallas_tests OpenMP::OpenMP_CXX Threads::Threads)
-target_link_libraries(pallas_tests nlohmann_json::nlohmann_json)
+target_link_libraries(pallas_tests pallas_core)
 add_test(NAME pallas_unit_tests COMMAND pallas_tests)

@@ -39,14 +39,15 @@ Tensor Tensor::matmul(const Tensor& a, const Tensor& b) {
 
     size_t m = a.shape[0], k = a.shape[1], n = b.shape[1];
     Tensor c({m, n}, 0.0f);
-    #pragma omp parallel for collapse(2)
+    #pragma omp parallel for
     for (size_t i = 0; i < m; i++) {
-        for (size_t j = 0; j < n; j++) {
-            float sum = 0.0f;
-            for (size_t p = 0; p < k; p++) {
-                sum += a.data[i * k + p] * b.data[p * n + j];
+        float* c_row = &c.data[i * n];
+        for (size_t p = 0; p < k; p++) {
+            const float a_ip = a.data[i * k + p];
+            const float* b_row = &b.data[p * n];
+            for (size_t j = 0; j < n; j++) {
+                c_row[j] += a_ip * b_row[j];
             }
-            c.data[i * n + j] = sum;
         }
     }
     return c;
@@ -82,7 +83,25 @@ Tensor Tensor::transpose() const {
 }
 
 void Tensor::softmax() {
-    size_t batch = shape[0], vocab = shape[1];
+    if (shape.empty()) {
+        throw std::runtime_error("softmax expects non-empty shape");
+    }
+
+    size_t batch = 1;
+    size_t vocab = 0;
+    if (shape.size() == 1) {
+        vocab = shape[0];
+    } else if (shape.size() == 2) {
+        batch = shape[0];
+        vocab = shape[1];
+    } else {
+        throw std::runtime_error("softmax expects 1D or 2D tensor");
+    }
+
+    if (vocab == 0 || data.size() != batch * vocab) {
+        throw std::runtime_error("softmax shape/data mismatch");
+    }
+
     #pragma omp parallel for
     for (size_t b = 0; b < batch; b++) {
         float max_val = *std::max_element(data.begin() + b * vocab, data.begin() + (b + 1) * vocab);
@@ -97,16 +116,28 @@ void Tensor::softmax() {
     }
 }
 
-float cross_entropy(const Tensor& logits, int target) {
+float cross_entropy(const Tensor& logits, uint32_t target) {
+    if (logits.data.empty()) {
+        return 0.0f;
+    }
+    const size_t classes = logits.shape.size() == 1 ? logits.shape[0] : (logits.shape.size() == 2 ? logits.shape[1] : 0);
+    if (classes == 0 || target >= classes || target >= logits.data.size()) {
+        return 0.0f;
+    }
     Tensor probs = logits;
     probs.softmax();
-    return -log(probs.data[target]);
+    const float p = std::max(probs.data[target], std::numeric_limits<float>::min());
+    return -std::log(p);
 }
 
-Tensor grad_cross_entropy(const Tensor& logits, int target) {
+Tensor grad_cross_entropy(const Tensor& logits, uint32_t target) {
     Tensor grad = logits;
     grad.softmax();
-    grad.data[target] -= 1.0f;
+    if (target < grad.data.size()) {
+        grad.data[target] -= 1.0f;
+    } else {
+        std::fill(grad.data.begin(), grad.data.end(), 0.0f);
+    }
     return grad;
 }
 
@@ -114,7 +145,7 @@ float cross_entropy_advanced(const Tensor& logits, uint32_t target, float label_
     Tensor probs = logits;
     probs.softmax();
 
-    const size_t classes = logits.shape[1];
+    const size_t classes = logits.shape.size() == 1 ? logits.shape[0] : (logits.shape.size() == 2 ? logits.shape[1] : 0);
     if (target >= classes) {
         return 0.0f;
     }
@@ -136,7 +167,7 @@ Tensor grad_cross_entropy_advanced(const Tensor& logits, uint32_t target, float 
     Tensor grad = logits;
     grad.softmax();
 
-    const size_t classes = logits.shape[1];
+    const size_t classes = logits.shape.size() == 1 ? logits.shape[0] : (logits.shape.size() == 2 ? logits.shape[1] : 0);
     if (target >= classes) {
         std::fill(grad.data.begin(), grad.data.end(), 0.0f);
         return grad;
@@ -154,7 +185,7 @@ Tensor grad_cross_entropy_advanced(const Tensor& logits, uint32_t target, float 
 }
 
 bool top_k_hit(const Tensor& logits, uint32_t target, size_t k) {
-    const size_t classes = logits.shape[1];
+    const size_t classes = logits.shape.size() == 1 ? logits.shape[0] : (logits.shape.size() == 2 ? logits.shape[1] : 0);
     if (target >= classes) {
         return false;
     }

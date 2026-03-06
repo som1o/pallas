@@ -2,6 +2,7 @@
 #define MODEL_H
 
 #include "battle_common.h"
+#include "country_state_common.h"
 #include "linear.h"
 #include <array>
 #include <cstdint>
@@ -76,26 +77,7 @@ struct NegotiationTerms {
     std::string details;
 };
 
-struct CountrySnapshot {
-    uint16_t id = 0;
-    std::string color;
-    uint64_t population = 0;
-    int64_t units_infantry_milli = 0;
-    int64_t units_armor_milli = 0;
-    int64_t units_artillery_milli = 0;
-    int64_t units_air_fighter_milli = 0;
-    int64_t units_air_bomber_milli = 0;
-    int64_t units_naval_surface_milli = 0;
-    int64_t units_naval_submarine_milli = 0;
-    int64_t economic_stability_milli = 0;
-    int64_t civilian_morale_milli = 0;
-    int64_t logistics_milli = 0;
-    int64_t intelligence_milli = 0;
-    int64_t industry_milli = 0;
-    int64_t technology_milli = 0;
-    int64_t resource_reserve_milli = 0;
-    int64_t supply_level_milli = 0;
-    int64_t supply_capacity_milli = 0;
+struct CountrySnapshot : public CountryStateCommon {
     int64_t weather_severity_milli = 0;
     int64_t seasonal_effect_milli = 0;
     int64_t supply_stockpile_milli = 0;
@@ -110,40 +92,16 @@ struct CountrySnapshot {
     int64_t resource_minerals_milli = 0;
     int64_t resource_food_milli = 0;
     int64_t resource_rare_earth_milli = 0;
-    int64_t trade_balance_milli = 0;
-    std::vector<uint16_t> trade_partner_ids;
-    int64_t resource_oil_reserves_milli = 0;
-    int64_t resource_minerals_reserves_milli = 0;
-    int64_t resource_food_reserves_milli = 0;
-    int64_t resource_rare_earth_reserves_milli = 0;
-    int64_t military_upkeep_milli = 0;
-    int64_t faction_military_milli = 0;
-    int64_t faction_industrial_milli = 0;
-    int64_t faction_civilian_milli = 0;
-    int64_t coup_risk_milli = 0;
-    int32_t election_cycle = 0;
-    int64_t draft_level_milli = 0;
-    int64_t war_weariness_milli = 0;
     int64_t gov_stability_milli = 0;
     int64_t public_dissent_milli = 0;
     int64_t corruption_milli = 0;
     int64_t nuclear_readiness_milli = 0;
     int64_t deterrence_posture_milli = 0;
-    int64_t reputation_milli = 0;
-    int64_t escalation_level_milli = 0;
     int64_t trust_average_milli = 50000;
     std::unordered_map<uint16_t, int64_t> trust_in_milli;
     std::unordered_map<uint16_t, int64_t> believed_army_size_milli;
-    int32_t recent_betrayals = 0;
     int64_t strategic_depth_milli = 2000;
     std::unordered_map<uint16_t, int64_t> opponent_model_confidence_milli;
-    uint8_t diplomatic_stance = 1;
-    bool second_strike_capable = false;
-    std::vector<uint16_t> adjacent_country_ids;
-    std::vector<uint16_t> allied_country_ids;
-    std::vector<uint16_t> defense_pact_ids;
-    std::vector<uint16_t> non_aggression_pact_ids;
-    std::vector<uint16_t> trade_treaty_ids;
     std::unordered_map<uint16_t, int64_t> intel_on_enemy_milli;
 };
 

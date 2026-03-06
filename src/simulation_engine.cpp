@@ -1,4 +1,5 @@
 #include "simulation_engine.h"
+#include "common_utils.h"
 
 #include <algorithm>
 #include <cmath>
@@ -15,17 +16,6 @@ namespace {
 
 constexpr uint32_t kMapMagic = 0x50414C4D;
 constexpr uint32_t kMapVersion = 1;
-
-template <typename T>
-void write_binary(std::ofstream& out, const T& value) {
-    out.write(reinterpret_cast<const char*>(&value), sizeof(T));
-}
-
-template <typename T>
-bool read_binary(std::ifstream& in, T* value) {
-    in.read(reinterpret_cast<char*>(value), sizeof(T));
-    return static_cast<bool>(in);
-}
 
 uint64_t mix_u64(uint64_t value) {
     value ^= value >> 33U;
@@ -46,26 +36,8 @@ Fixed clamp_fixed(const Fixed& value, const Fixed& lo, const Fixed& hi) {
     return value;
 }
 
-bool contains_id(const std::vector<uint16_t>& values, uint16_t id) {
-    return std::find(values.begin(), values.end(), id) != values.end();
-}
-
 Fixed country_strength_estimate(const Country& country) {
     return country.military.weighted_total();
-}
-
-void add_unique_id(std::vector<uint16_t>* values, uint16_t id) {
-    if (values == nullptr || id == 0 || contains_id(*values, id)) {
-        return;
-    }
-    values->push_back(id);
-}
-
-void erase_id(std::vector<uint16_t>* values, uint16_t id) {
-    if (values == nullptr) {
-        return;
-    }
-    values->erase(std::remove(values->begin(), values->end(), id), values->end());
 }
 
 double normalized_event_roll(uint64_t seed, uint64_t salt) {
@@ -137,7 +109,7 @@ Fixed Fixed::operator*(const Fixed& other) const {
 
 Fixed Fixed::operator/(const Fixed& other) const {
     if (other.raw_ == 0) {
-        return Fixed(0);
+        throw std::runtime_error("Fixed divide by zero");
     }
     return Fixed((raw_ * kScale) / other.raw_);
 }
@@ -231,12 +203,12 @@ bool GridMap::save_binary(const std::string& path) const {
         return false;
     }
 
-    write_binary(out, kMapMagic);
-    write_binary(out, kMapVersion);
-    write_binary(out, width_);
-    write_binary(out, height_);
+    pallas::util::write_binary(out, kMapMagic);
+    pallas::util::write_binary(out, kMapVersion);
+    pallas::util::write_binary(out, width_);
+    pallas::util::write_binary(out, height_);
     const uint64_t cells = static_cast<uint64_t>(country_ids_.size());
-    write_binary(out, cells);
+    pallas::util::write_binary(out, cells);
     if (!country_ids_.empty()) {
         out.write(reinterpret_cast<const char*>(country_ids_.data()), static_cast<std::streamsize>(country_ids_.size() * sizeof(uint16_t)));
     }
@@ -252,7 +224,9 @@ bool GridMap::load_binary(const std::string& path) {
     uint32_t magic = 0;
     uint32_t version = 0;
     uint64_t cells = 0;
-    if (!read_binary(in, &magic) || !read_binary(in, &version) || !read_binary(in, &width_) || !read_binary(in, &height_) || !read_binary(in, &cells)) {
+    if (!pallas::util::read_binary(in, &magic) || !pallas::util::read_binary(in, &version) ||
+        !pallas::util::read_binary(in, &width_) || !pallas::util::read_binary(in, &height_) ||
+        !pallas::util::read_binary(in, &cells)) {
         return false;
     }
     if (magic != kMapMagic || version != kMapVersion) {
@@ -390,7 +364,8 @@ CombatResult World::resolve_attack(uint16_t attacker_id,
         return result;
     }
 
-    if (contains_id(attacker->allied_country_ids, defender_id) || contains_id(attacker->has_non_aggression_with, defender_id)) {
+    if (pallas::util::contains_id(attacker->allied_country_ids, defender_id) ||
+        pallas::util::contains_id(attacker->has_non_aggression_with, defender_id)) {
         return result;
     }
 
@@ -559,8 +534,8 @@ CombatResult World::resolve_attack(uint16_t attacker_id,
     defender->politics.public_dissent = clamp_fixed(defender->politics.public_dissent + Fixed::from_double(defender_losses_ratio * 5.0), Fixed::from_int(0), Fixed::from_int(100));
     attacker->intel_on_enemy[defender_id] = clamp_fixed(attacker->intel_on_enemy[defender_id] + Fixed::from_double(3.0), Fixed::from_int(0), Fixed::from_int(100));
     defender->intel_on_enemy[attacker_id] = clamp_fixed(defender->intel_on_enemy[attacker_id] + Fixed::from_double(4.0), Fixed::from_int(0), Fixed::from_int(100));
-    erase_id(&attacker->trade_partners, defender_id);
-    erase_id(&defender->trade_partners, attacker_id);
+    pallas::util::erase_id(&attacker->trade_partners, defender_id);
+    pallas::util::erase_id(&defender->trade_partners, attacker_id);
 
     result.infrastructure_damage = Fixed::from_double(std::min(45.0, defender_losses_ratio * 180.0 + attacker_losses_ratio * 60.0));
     result.population_displaced = static_cast<int32_t>(std::llround(result.infrastructure_damage.to_double() * 150.0));
@@ -669,8 +644,8 @@ void World::resolve_negotiation(uint16_t country_a, uint16_t country_b) {
     a->trust_scores[country_b] = clamp_fixed(a->trust_scores[country_b] + Fixed::from_double(3.0), Fixed::from_int(0), Fixed::from_int(100));
     b->trust_scores[country_a] = clamp_fixed(b->trust_scores[country_a] + Fixed::from_double(3.0), Fixed::from_int(0), Fixed::from_int(100));
     if (!is_embargoed_between(*a, *b)) {
-        add_unique_id(&a->trade_partners, country_b);
-        add_unique_id(&b->trade_partners, country_a);
+        pallas::util::add_unique_id(&a->trade_partners, country_b);
+        pallas::util::add_unique_id(&b->trade_partners, country_a);
         a->trade_balance = clamp_fixed(a->trade_balance + Fixed::from_double(0.8), Fixed::from_int(-100), Fixed::from_int(100));
         b->trade_balance = clamp_fixed(b->trade_balance + Fixed::from_double(0.8), Fixed::from_int(-100), Fixed::from_int(100));
     }
@@ -783,11 +758,12 @@ uint64_t World::derive_event_seed(uint16_t attacker_id, uint16_t defender_id) co
 }
 
 bool World::has_active_trade_link(const Country& a, uint16_t other_id) const {
-    return contains_id(a.trade_partners, other_id);
+    return pallas::util::contains_id(a.trade_partners, other_id);
 }
 
 bool World::is_embargoed_between(const Country& a, const Country& b) const {
-    return contains_id(a.embargoed_country_ids, b.id) || contains_id(b.embargoed_country_ids, a.id);
+        return pallas::util::contains_id(a.embargoed_country_ids, b.id) ||
+            pallas::util::contains_id(b.embargoed_country_ids, a.id);
 }
 
 void World::update_trade_and_internal_politics() {
@@ -835,8 +811,8 @@ void World::update_trade_and_internal_politics() {
                 continue;
             }
             Country& other = countries_[it->second];
-            erase_id(&country.trade_partners, other.id);
-            erase_id(&other.trade_partners, country.id);
+            pallas::util::erase_id(&country.trade_partners, other.id);
+            pallas::util::erase_id(&other.trade_partners, country.id);
             country.economic_stability = clamp_fixed(country.economic_stability - Fixed::from_double(0.45), Fixed::from_int(0), Fixed::from_int(100));
             other.economic_stability = clamp_fixed(other.economic_stability - Fixed::from_double(0.30), Fixed::from_int(0), Fixed::from_int(100));
             country.trust_scores[other.id] = clamp_fixed(country.trust_scores[other.id] - Fixed::from_double(0.9), Fixed::from_int(0), Fixed::from_int(100));
@@ -861,7 +837,10 @@ void World::update_trade_and_internal_politics() {
                 b.resource_minerals_reserves.to_double() * 0.6 + b.resource_rare_earth_reserves.to_double() * 0.8;
             const double a_demand = a.industrial_output.to_double() * 0.9 + a.military_upkeep.to_double() * 0.8 + a.draft_level.to_double() * 0.3;
             const double b_demand = b.industrial_output.to_double() * 0.9 + b.military_upkeep.to_double() * 0.8 + b.draft_level.to_double() * 0.3;
-            const double treaty_bonus = (contains_id(a.has_trade_treaty_with, b.id) && contains_id(b.has_trade_treaty_with, a.id)) ? 1.18 : 1.0;
+                const double treaty_bonus = (pallas::util::contains_id(a.has_trade_treaty_with, b.id) &&
+                                                      pallas::util::contains_id(b.has_trade_treaty_with, a.id))
+                                                          ? 1.18
+                                                          : 1.0;
             const double trust_factor = (0.65 + std::min(0.35, (a.trust_scores[b.id].to_double() + b.trust_scores[a.id].to_double()) / 260.0)) * treaty_bonus;
             const double gross_flow = std::clamp(((a_supply - a_demand) - (b_supply - b_demand)) / 42.0, -6.0, 6.0) * trust_factor;
 

@@ -1,20 +1,63 @@
 #include "linear.h"
+
+#include <cstdlib>
+#include <mutex>
 #include <random>
+#include <string>
+#include <stdexcept>
+
+namespace {
+
+std::mutex g_linear_rng_mu;
+
+std::mt19937& linear_rng() {
+    static std::mt19937 rng([]() {
+        const char* env = std::getenv("PALLAS_LINEAR_SEED");
+        if (env != nullptr) {
+            try {
+                return static_cast<uint32_t>(std::stoul(env));
+            } catch (...) {
+            }
+        }
+        return 1337U;
+    }());
+    return rng;
+}
+
+}  // namespace
 
 Linear::Linear(size_t in, size_t out) : in_dim(in), out_dim(out), weight({out, in}, 0.0f), bias({out}, 0.0f) {
-    std::random_device rd;
-    std::mt19937 gen(rd());
+    std::lock_guard<std::mutex> lock(g_linear_rng_mu);
     std::normal_distribution<float> dist(0.0f, 0.1f);
-    for (auto& w : weight.data) w = dist(gen);
-    for (auto& b : bias.data) b = dist(gen);
+    for (auto& w : weight.data) {
+        w = dist(linear_rng());
+    }
+    for (auto& b : bias.data) {
+        b = dist(linear_rng());
+    }
+}
+
+void Linear::set_global_seed(uint32_t seed) {
+    std::lock_guard<std::mutex> lock(g_linear_rng_mu);
+    linear_rng().seed(seed);
 }
 
 Tensor Linear::forward(const Tensor& input) {
-    Tensor wt = weight.transpose();
-    Tensor out = Tensor::matmul(input, wt);
-    for (size_t b = 0; b < input.shape[0]; b++) {
-        for (size_t o = 0; o < out_dim; o++) {
-            out.data[b * out_dim + o] += bias.data[o];
+    if (input.shape.size() != 2 || input.shape[1] != in_dim) {
+        throw std::runtime_error("Linear::forward input shape mismatch");
+    }
+    const size_t batch = input.shape[0];
+    Tensor out({batch, out_dim}, 0.0f);
+    for (size_t b = 0; b < batch; ++b) {
+        const float* in_row = &input.data[b * in_dim];
+        float* out_row = &out.data[b * out_dim];
+        for (size_t o = 0; o < out_dim; ++o) {
+            const float* w_row = &weight.data[o * in_dim];
+            float sum = bias.data[o];
+            for (size_t i = 0; i < in_dim; ++i) {
+                sum += in_row[i] * w_row[i];
+            }
+            out_row[o] = sum;
         }
     }
     return out;

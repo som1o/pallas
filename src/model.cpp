@@ -1,5 +1,7 @@
 #include "model.h"
 
+#include "common_utils.h"
+
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -19,18 +21,6 @@
 #endif
 
 namespace {
-
-std::string trim(const std::string& s) {
-    size_t start = 0;
-    while (start < s.size() && std::isspace(static_cast<unsigned char>(s[start]))) {
-        ++start;
-    }
-    size_t end = s.size();
-    while (end > start && std::isspace(static_cast<unsigned char>(s[end - 1]))) {
-        --end;
-    }
-    return s.substr(start, end - start);
-}
 
 std::vector<size_t> parse_number_list(const std::string& raw) {
     std::vector<size_t> out;
@@ -275,7 +265,7 @@ ModelConfig load_model_config(const std::string& config_path) {
     std::ostringstream ss;
     ss << file.rdbuf();
     std::string content = ss.str();
-    std::string t = trim(content);
+    std::string t = pallas::util::trim_copy(content);
 
     if (!t.empty() && t[0] == '{') {
 #if PALLAS_HAS_NLOHMANN_JSON
@@ -327,12 +317,12 @@ ModelConfig load_model_config(const std::string& config_path) {
     std::string line;
     bool reading_hidden = false;
     while (std::getline(lines, line)) {
-        std::string s = trim(line);
+        std::string s = pallas::util::trim_copy(line);
         if (s.empty() || s[0] == '#') {
             continue;
         }
         if (s.rfind("hidden_layers:", 0) == 0) {
-            std::string rhs = trim(s.substr(std::string("hidden_layers:").size()));
+            std::string rhs = pallas::util::trim_copy(s.substr(std::string("hidden_layers:").size()));
             if (!rhs.empty()) {
                 std::vector<size_t> layers = parse_number_list(rhs);
                 if (!layers.empty()) cfg.hidden_layers = layers;
@@ -345,23 +335,23 @@ ModelConfig load_model_config(const std::string& config_path) {
         }
         if (reading_hidden && s.rfind("-", 0) == 0) {
             try {
-                cfg.hidden_layers.push_back(static_cast<size_t>(std::stoul(trim(s.substr(1)))));
+                cfg.hidden_layers.push_back(static_cast<size_t>(std::stoul(pallas::util::trim_copy(s.substr(1)))));
             } catch (...) {
             }
             continue;
         }
         reading_hidden = false;
         if (s.rfind("activation:", 0) == 0) {
-            cfg.activation = trim(s.substr(std::string("activation:").size()));
+            cfg.activation = pallas::util::trim_copy(s.substr(std::string("activation:").size()));
         } else if (s.rfind("norm:", 0) == 0) {
-            cfg.norm = trim(s.substr(std::string("norm:").size()));
+            cfg.norm = pallas::util::trim_copy(s.substr(std::string("norm:").size()));
         } else if (s.rfind("dropout_prob:", 0) == 0) {
-            try { cfg.dropout_prob = std::stof(trim(s.substr(std::string("dropout_prob:").size()))); } catch (...) {}
+            try { cfg.dropout_prob = std::stof(pallas::util::trim_copy(s.substr(std::string("dropout_prob:").size()))); } catch (...) {}
         } else if (s.rfind("use_dropout:", 0) == 0) {
-            std::string b = trim(s.substr(std::string("use_dropout:").size()));
+            std::string b = pallas::util::trim_copy(s.substr(std::string("use_dropout:").size()));
             cfg.use_dropout = (b == "true" || b == "1" || b == "yes");
         } else if (s.rfind("leaky_relu_alpha:", 0) == 0) {
-            try { cfg.leaky_relu_alpha = std::stof(trim(s.substr(std::string("leaky_relu_alpha:").size()))); } catch (...) {}
+            try { cfg.leaky_relu_alpha = std::stof(pallas::util::trim_copy(s.substr(std::string("leaky_relu_alpha:").size()))); } catch (...) {}
         }
     }
 
