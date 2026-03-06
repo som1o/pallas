@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Pallas Warroom</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside id="sidebar" class="sidebar expanded">
+      <div class="sidebar-head">
+        <h1>Pallas</h1>
+        <button id="collapseSidebarBtn" class="ghost-btn" aria-label="Collapse sidebar">Collapse</button>
+      </div>
+
+      <div class="tab-bar">
+        <button class="tab-btn active" data-tab="overviewTab">Overview</button>
+        <button class="tab-btn" data-tab="modelsTab">Models</button>
+        <button class="tab-btn" data-tab="detailsTab">Details</button>
+        <button class="tab-btn" data-tab="commandTab">ComCent</button>
+      </div>
+
+      <section id="overviewTab" class="tab-panel active">
+        <div class="row controls-row">
+          <button id="stepBtn">Step</button>
+          <button id="startBtn">Start</button>
+          <button id="endBtn">End</button>
+          <button id="resetBtn">Reset</button>
+        </div>
+        <label class="row speed">
+          Duration
+          <input id="durationInput" type="number" min="60" value="180">
+          <span>sec</span>
+        </label>
+        <label class="row speed">
+          Tick Rate
+          <input id="speedInput" type="range" min="1" max="20" value="4">
+          <span id="speedValue">4</span> tps
+        </label>
+        <div class="stats" id="stats"></div>
+        <h2>Strategic Climate</h2>
+        <div class="stats" id="strategicSummary"></div>
+        <h2>Distributed</h2>
+        <div class="stats" id="distributed"></div>
+        <h2>Diagnostics</h2>
+        <div class="stats" id="diagnostics"></div>
+      </section>
+
+      <section id="detailsTab" class="tab-panel">
+        <h2>Leaderboard</h2>
+        <ul id="leaderboard"></ul>
+        <h2>Theater Snapshot</h2>
+        <ul id="countrySummary"></ul>
+        <h2>Messages</h2>
+        <ul id="messages"></ul>
+        <h2>Decisions</h2>
+        <ul id="decisions"></ul>
+      </section>
+
+      <section id="modelsTab" class="tab-panel">
+        <p class="muted">Drop `.bin` weights onto any country card to replace the active slot for that sovereign controller.</p>
+        <h2>Model Readiness</h2>
+        <div id="modelReadiness" class="stats"></div>
+        <div id="uploadStatus" class="muted"></div>
+        <div id="countryUploadGrid" class="country-grid"></div>
+        <h2>Country Survivors</h2>
+        <ul id="finalistsList"></ul>
+        <h2>Eliminated Models</h2>
+        <ul id="eliminatedList"></ul>
+        <h2>Model Hierarchy</h2>
+        <div id="modelHierarchy" class="hierarchy"></div>
+      </section>
+
+      <section id="commandTab" class="tab-panel">
+        <p class="muted">Manual override decisions for debugging, live steering, and treaty or escalation testing.</p>
+        <div class="command-grid">
+          <label>Actor Country ID <input id="overrideActor" type="number" min="1" step="1"></label>
+          <label>Target Country ID <input id="overrideTarget" type="number" min="0" step="1"></label>
+          <label>Strategy
+            <select id="overrideStrategy">
+              <option value="attack">attack</option>
+              <option value="defend">defend</option>
+              <option value="negotiate">negotiate</option>
+              <option value="surrender">surrender</option>
+              <option value="transfer_weapons">transfer_weapons</option>
+              <option value="focus_economy">focus_economy</option>
+              <option value="develop_technology">develop_technology</option>
+              <option value="form_alliance">form_alliance</option>
+              <option value="betray">betray</option>
+              <option value="cyber_operation">cyber_operation</option>
+              <option value="sign_trade_agreement">sign_trade_agreement</option>
+              <option value="cancel_trade_agreement">cancel_trade_agreement</option>
+              <option value="impose_embargo">impose_embargo</option>
+              <option value="invest_in_resource_extraction">invest_in_resource_extraction</option>
+              <option value="reduce_military_upkeep">reduce_military_upkeep</option>
+              <option value="suppress_dissent">suppress_dissent</option>
+              <option value="hold_elections">hold_elections</option>
+              <option value="coup_attempt">coup_attempt</option>
+              <option value="propose_defense_pact">propose_defense_pact</option>
+              <option value="propose_non_aggression">propose_non_aggression</option>
+              <option value="break_treaty">break_treaty</option>
+              <option value="request_intel">request_intel</option>
+              <option value="deploy_units">deploy_units</option>
+              <option value="tactical_nuke">tactical_nuke</option>
+              <option value="strategic_nuke">strategic_nuke</option>
+              <option value="cyber_attack">cyber_attack</option>
+            </select>
+          </label>
+          <label>Terms Type <input id="overrideTermsType" type="text" placeholder="alliance"></label>
+          <label>Terms Details <input id="overrideTermsDetails" type="text" placeholder="Debug path"></label>
+          <button id="overrideApplyBtn">Apply Override</button>
+        </div>
+        <div id="commandStatus" class="muted"></div>
+        <h2>Model Load Errors</h2>
+        <ul id="modelErrors"></ul>
+      </section>
+    </aside>
+
+    <main class="map-stage">
+      <button id="expandSidebarBtn" class="ghost-btn hidden">Open Panel</button>
+      <div class="map-toolbar">
+        <button id="zoomInBtn">+</button>
+        <button id="zoomOutBtn">-</button>
+        <button id="resetViewBtn">Reset View</button>
+        <span id="perfBadge" class="perf-badge">FPS: --</span>
+      </div>
+      <canvas id="map" width="1280" height="720"></canvas>
+      <div id="countryTooltip" class="tooltip hidden"></div>
+    </main>
+  </div>
+
+  <div id="resultsModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="resultsTitle">
+    <div class="modal-card">
+      <h2 id="resultsTitle">Battle Results</h2>
+      <div id="resultsSummary" class="stats"></div>
+      <ul id="resultsLeaderboard"></ul>
+      <div id="resultsMessage" class="muted"></div>
+      <div class="row">
+        <button id="closeResultsBtn">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

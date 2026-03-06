@@ -1,0 +1,40 @@
+# Build artifacts
+build/
+cmake-build-*/
+compile_commands.json
+
+# CMake generated files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+
+# Model/data artifacts
+data/*.bin
+data/battle_train.json
+data/battle_train.txt
+data/model_zoo/manifest.tsv
+data/model_zoo/*.bin
+data/model_zoo/*.ckpt
+data/model_zoo/*.pt
+data/model_zoo/*.onnx
+*.ckpt
+*.pt
+*.pth
+*.onnx
+*.pb
+data/vocab.txt
+
+# Editor/OS
+.vscode/
+.DS_Store
+
+# Logs
+logs/
+*.log
+
+# Binary outputs
+*.so
+*.a
+*.o
+*.out

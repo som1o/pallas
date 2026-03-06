@@ -1,0 +1,19 @@
+{
+  "epochs": 28,
+  "batch_size": 64,
+  "validation_split": 0.12,
+  "early_stopping_patience": 7,
+  "base_lr": 0.0007,
+  "optimizer": "adam",
+  "weight_decay": 0.00015,
+  "adam_beta1": 0.9,
+  "adam_beta2": 0.999,
+  "adam_epsilon": 1e-8,
+  "scheduler": "cosine",
+  "step_size": 8,
+  "gamma": 0.92,
+  "min_lr": 0.000005,
+  "label_smoothing": 0.02,
+  "use_class_weights": true,
+  "class_weights_path": "../data/class_weights.txt"
+}
