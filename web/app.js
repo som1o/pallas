@@ -40,7 +40,7 @@ const state = {
   map: { width: 0, height: 0, cells: [] },
   apiMeta: {
     api_version: 1,
-    max_upload_bytes: 16 * 1024 * 1024,
+    max_upload_bytes: 10 * 1024 * 1024,
     strategies: [],
     targeted_strategies: []
   },
@@ -377,7 +377,7 @@ function validateModelFile(file) {
   if (!file) return "No file selected.";
   if (!/\.bin$/i.test(file.name)) return "Only .bin model files are accepted.";
   if (file.size <= 0) return "Model file is empty.";
-  const maxUploadBytes = Math.max(1, asNumber(state.apiMeta.max_upload_bytes, 16 * 1024 * 1024));
+  const maxUploadBytes = Math.max(1, asNumber(state.apiMeta.max_upload_bytes, 10 * 1024 * 1024));
   if (file.size > maxUploadBytes) {
     return `Model file exceeds ${(maxUploadBytes / (1024 * 1024)).toFixed(1)}MB limit.`;
   }
@@ -719,7 +719,7 @@ function renderMapLegend() {
   }
 
   const zoneCount = new Set(seaZones.filter((zone) => asNumber(zone, 0) > 0)).size;
-  const uploadLimitMb = (Math.max(1, asNumber(state.apiMeta.max_upload_bytes, 16 * 1024 * 1024)) / (1024 * 1024)).toFixed(1);
+  const uploadLimitMb = (Math.max(1, asNumber(state.apiMeta.max_upload_bytes, 10 * 1024 * 1024)) / (1024 * 1024)).toFixed(1);
   mapLegendEl.innerHTML = [
     `<div><b>Sea Cells:</b> ${seaCells} | <b>Sea Zones:</b> ${zoneCount}</div>`,
     `<div><b>Strategic:</b> ${strategicCells} | <b>Chokepoints:</b> ${chokepointCells}</div>`,

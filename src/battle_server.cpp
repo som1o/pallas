@@ -26,7 +26,7 @@ namespace battle {
 namespace {
 
 constexpr size_t kMaxHeaderBytes = 64 * 1024;
-constexpr size_t kDefaultMaxUploadBytes = 8 * 1024 * 1024;
+constexpr size_t kDefaultMaxUploadBytes = 10 * 1024 * 1024;
 constexpr int kSocketTimeoutSec = 5;
 
 std::string status_text(int status) {
