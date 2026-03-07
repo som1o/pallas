@@ -25,6 +25,12 @@ struct TrainConfig {
     float label_smoothing = 0.0f;
     bool use_class_weights = false;
     std::string class_weights_path = "../data/class_weights.txt";
+
+    bool use_actor_critic = true;
+    float policy_loss_weight = 1.0f;
+    float value_loss_weight = 0.45f;
+    float reward_scale = 1.0f;
+    float entropy_coeff = 0.01f;
 };
 
 TrainConfig load_train_config(const std::string& config_path);

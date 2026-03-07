@@ -38,6 +38,12 @@ const state = {
   uploadedModels: {},
   competition: { finalists: [], eliminated: [], winner_country_name: "", winner_country_id: 0, winner_model: "" },
   map: { width: 0, height: 0, cells: [] },
+  apiMeta: {
+    api_version: 1,
+    max_upload_bytes: 16 * 1024 * 1024,
+    strategies: [],
+    targeted_strategies: []
+  },
   winnerCountryId: 0,
   winnerCountryName: "",
   modelLoadErrors: [],
@@ -106,6 +112,7 @@ const messagesEl = document.getElementById("messages");
 const leaderboardEl = document.getElementById("leaderboard");
 const distributedEl = document.getElementById("distributed");
 const diagnosticsEl = document.getElementById("diagnostics");
+const mapLegendEl = document.getElementById("mapLegend");
 const strategicSummaryEl = document.getElementById("strategicSummary");
 const countrySummaryEl = document.getElementById("countrySummary");
 const uploadStatusEl = document.getElementById("uploadStatus");
@@ -123,10 +130,12 @@ const resultsLeaderboardEl = document.getElementById("resultsLeaderboard");
 const resultsMessageEl = document.getElementById("resultsMessage");
 const stepBtn = document.getElementById("stepBtn");
 const startBtn = document.getElementById("startBtn");
+const pauseBtn = document.getElementById("pauseBtn");
 const tooltipEl = document.getElementById("countryTooltip");
 const perfBadgeEl = document.getElementById("perfBadge");
 const modelErrorsEl = document.getElementById("modelErrors");
 const commandStatusEl = document.getElementById("commandStatus");
+const overrideStrategyEl = document.getElementById("overrideStrategy");
 
 const hiddenCountryFileInput = document.createElement("input");
 hiddenCountryFileInput.type = "file";
@@ -135,7 +144,7 @@ hiddenCountryFileInput.style.display = "none";
 document.body.appendChild(hiddenCountryFileInput);
 
 const COUNTRY_PALETTE = ["#db7a4a", "#55a18f", "#d3b862", "#5d7dd8", "#ad6ddd", "#85b65b", "#e58d5f", "#5ca8d6"];
-const TARGETED_STRATEGIES = new Set([
+let targetedStrategies = new Set([
   "attack",
   "negotiate",
   "transfer_weapons",
@@ -154,6 +163,16 @@ const TARGETED_STRATEGIES = new Set([
   "strategic_nuke",
   "cyber_attack"
 ]);
+
+const MAP_TAGS = {
+  SEA: 1,
+  STRATEGIC: 2,
+  CHOKE_STRAIT: 4,
+  CHOKE_CANAL: 8,
+  MOUNTAIN_PASS: 16,
+  RIVER_CROSSING: 32,
+  PORT: 64
+};
 
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
@@ -358,7 +377,10 @@ function validateModelFile(file) {
   if (!file) return "No file selected.";
   if (!/\.bin$/i.test(file.name)) return "Only .bin model files are accepted.";
   if (file.size <= 0) return "Model file is empty.";
-  if (file.size > 16 * 1024 * 1024) return "Model file exceeds 16MB limit.";
+  const maxUploadBytes = Math.max(1, asNumber(state.apiMeta.max_upload_bytes, 16 * 1024 * 1024));
+  if (file.size > maxUploadBytes) {
+    return `Model file exceeds ${(maxUploadBytes / (1024 * 1024)).toFixed(1)}MB limit.`;
+  }
   return "";
 }
 
@@ -641,6 +663,7 @@ function renderStats() {
     `<div><b>Elapsed:</b> ${asNumber(state.battle.elapsed_sec)}s | <b>Remaining:</b> ${asNumber(state.battle.remaining_sec)}s</div>`,
     `<div><b>Avg Supply:</b> ${avgSupply.toFixed(1)} | <b>Avg Morale:</b> ${avgMorale.toFixed(1)}</div>`
   ].join("");
+  pauseBtn.disabled = !state.battle.active;
 }
 
 function renderStrategicSummary() {
@@ -674,6 +697,34 @@ function renderDiagnostics() {
     `<div><b>Peers:</b> ${asNumber(d.peer_count)} | <b>Exchanges:</b> ${asNumber(d.exchange_count)}</div>`,
     `<div><b>Packets:</b> sent ${asNumber(d.packets_sent)}, recv ${asNumber(d.packets_received)}, drop ${asNumber(d.packets_dropped)}</div>`,
     `<div><b>Sync:</b> ${state.ui.lastRefreshError ? "degraded" : "stable"} | <b>Last Refresh:</b> ${state.ui.lastRefreshAt ? new Date(state.ui.lastRefreshAt).toLocaleTimeString() : "n/a"}</div>`
+  ].join("");
+}
+
+function renderMapLegend() {
+  const tags = asArray(state.map.tags);
+  const seaZones = asArray(state.map.sea_zones);
+  let seaCells = 0;
+  let strategicCells = 0;
+  let chokepointCells = 0;
+  let passOrCrossingCells = 0;
+  let portCells = 0;
+
+  for (const tag of tags) {
+    const value = asNumber(tag, 0);
+    if ((value & 1) !== 0) seaCells += 1;
+    if ((value & 2) !== 0) strategicCells += 1;
+    if ((value & (4 | 8)) !== 0) chokepointCells += 1;
+    if ((value & (16 | 32)) !== 0) passOrCrossingCells += 1;
+    if ((value & 64) !== 0) portCells += 1;
+  }
+
+  const zoneCount = new Set(seaZones.filter((zone) => asNumber(zone, 0) > 0)).size;
+  const uploadLimitMb = (Math.max(1, asNumber(state.apiMeta.max_upload_bytes, 16 * 1024 * 1024)) / (1024 * 1024)).toFixed(1);
+  mapLegendEl.innerHTML = [
+    `<div><b>Sea Cells:</b> ${seaCells} | <b>Sea Zones:</b> ${zoneCount}</div>`,
+    `<div><b>Strategic:</b> ${strategicCells} | <b>Chokepoints:</b> ${chokepointCells}</div>`,
+    `<div><b>Pass/Crossing:</b> ${passOrCrossingCells} | <b>Ports:</b> ${portCells}</div>`,
+    `<div><b>API:</b> v${asNumber(state.apiMeta.api_version, 1)} | <b>Upload Limit:</b> ${uploadLimitMb}MB</div>`
   ].join("");
 }
 
@@ -948,6 +999,7 @@ function renderOverview() {
   renderStrategicSummary();
   renderDistributed();
   renderDiagnostics();
+  renderMapLegend();
   renderLeaderboard();
   renderCountrySummary();
   renderMessages();
@@ -973,20 +1025,37 @@ function drawGridMap() {
   if (!map || map.width <= 0 || map.height <= 0) return;
 
   const cells = asArray(map.cells);
+  const tags = asArray(map.tags);
+  const seaZones = asArray(map.sea_zones);
   const cellW = canvas.width / map.width;
   const cellH = canvas.height / map.height;
   const countriesById = buildCountryMap();
 
   for (let y = 0; y < map.height; y += 1) {
     for (let x = 0; x < map.width; x += 1) {
-      const id = cells[y * map.width + x];
+      const index = y * map.width + x;
+      const id = cells[index];
       const country = countriesById.get(id);
       const base = countryColor(country);
       const rgb = hexToRgb(base);
+      const tagValue = asNumber(tags[index], 0);
+      const isSea = (tagValue & MAP_TAGS.SEA) !== 0;
+      const seaZone = asNumber(seaZones[index], 0);
       const n = Math.sin((x * 0.27 + y * 0.41 + id * 0.77 + state.tick * 0.02) * 2.4) * 0.08;
-      const light = 0.85 + n;
-      ctx.fillStyle = `rgb(${Math.round(rgb.r * light)},${Math.round(rgb.g * light)},${Math.round(rgb.b * light)})`;
+
+      if (isSea) {
+        const tint = seaZone <= 1 ? "rgba(38, 116, 157, 0.88)" : (seaZone === 2 ? "rgba(28, 98, 147, 0.9)" : "rgba(20, 78, 130, 0.9)");
+        ctx.fillStyle = tint;
+      } else {
+        const light = 0.85 + n;
+        ctx.fillStyle = `rgb(${Math.round(rgb.r * light)},${Math.round(rgb.g * light)},${Math.round(rgb.b * light)})`;
+      }
       ctx.fillRect(x * cellW, y * cellH, cellW + 1, cellH + 1);
+
+      if ((tagValue & MAP_TAGS.STRATEGIC) !== 0) {
+        ctx.fillStyle = "rgba(246, 209, 120, 0.15)";
+        ctx.fillRect(x * cellW, y * cellH, cellW + 1, cellH + 1);
+      }
     }
   }
 
@@ -1005,6 +1074,31 @@ function drawGridMap() {
     ctx.moveTo(0, py);
     ctx.lineTo(canvas.width, py);
     ctx.stroke();
+  }
+
+  // Draw map tag markers after base terrain so players can see sea lanes and chokepoints.
+  for (let y = 0; y < map.height; y += 1) {
+    for (let x = 0; x < map.width; x += 1) {
+      const index = y * map.width + x;
+      const tagValue = asNumber(tags[index], 0);
+      if (tagValue === 0) continue;
+
+      const cx = (x + 0.5) * cellW;
+      const cy = (y + 0.5) * cellH;
+
+      if ((tagValue & (MAP_TAGS.CHOKE_STRAIT | MAP_TAGS.CHOKE_CANAL)) !== 0) {
+        ctx.fillStyle = "rgba(255, 224, 160, 0.92)";
+        ctx.beginPath();
+        ctx.arc(cx, cy, Math.max(1.2, Math.min(cellW, cellH) * 0.12), 0, Math.PI * 2);
+        ctx.fill();
+      } else if ((tagValue & MAP_TAGS.PORT) !== 0) {
+        ctx.fillStyle = "rgba(118, 229, 199, 0.85)";
+        ctx.fillRect(cx - cellW * 0.12, cy - cellH * 0.12, cellW * 0.24, cellH * 0.24);
+      } else if ((tagValue & (MAP_TAGS.MOUNTAIN_PASS | MAP_TAGS.RIVER_CROSSING)) !== 0) {
+        ctx.fillStyle = "rgba(219, 239, 255, 0.8)";
+        ctx.fillRect(cx - cellW * 0.08, cy - cellH * 0.08, cellW * 0.16, cellH * 0.16);
+      }
+    }
   }
 
   const centers = countryCentroids();
@@ -1284,6 +1378,59 @@ function applyModelsPayload(data) {
   state.ui.modelPanelDirty = true;
 }
 
+function populateStrategyOptions(strategies) {
+  const items = asArray(strategies).filter((item) => typeof item === "string" && item.length > 0);
+  if (!items.length || !overrideStrategyEl) {
+    return;
+  }
+
+  const selected = overrideStrategyEl.value;
+  overrideStrategyEl.innerHTML = "";
+  for (const strategy of items) {
+    const option = document.createElement("option");
+    option.value = strategy;
+    option.textContent = strategy;
+    overrideStrategyEl.appendChild(option);
+  }
+
+  if (items.includes(selected)) {
+    overrideStrategyEl.value = selected;
+  } else if (items.includes("defend")) {
+    overrideStrategyEl.value = "defend";
+  } else {
+    overrideStrategyEl.value = items[0];
+  }
+}
+
+function applyMetaPayload(data) {
+  const maxUploadBytes = Math.max(1, asNumber(data.max_upload_bytes, state.apiMeta.max_upload_bytes));
+  const strategies = asArray(data.strategies);
+  const targeted = asArray(data.targeted_strategies);
+
+  state.apiMeta = {
+    api_version: asNumber(data.api_version, 1),
+    max_upload_bytes: maxUploadBytes,
+    strategies,
+    targeted_strategies: targeted
+  };
+
+  if (targeted.length > 0) {
+    targetedStrategies = new Set(targeted);
+  }
+  if (strategies.length > 0) {
+    populateStrategyOptions(strategies);
+  }
+}
+
+async function refreshMeta() {
+  try {
+    const payload = await api("/api/meta");
+    applyMetaPayload(payload);
+  } catch (error) {
+    state.ui.lastRefreshError = error.message;
+  }
+}
+
 async function refreshModelsIfDue(force = false) {
   const now = Date.now();
   if (!force && now - state.ui.lastModelRefreshAt < MODEL_REFRESH_INTERVAL_MS) {
@@ -1333,6 +1480,10 @@ async function refreshAll(forceModels = false) {
       refreshError = diagnosticsResult.reason?.message || "diagnostics refresh failed";
     }
 
+    if (forceModels || state.apiMeta.strategies.length === 0) {
+      await refreshMeta();
+    }
+
     await refreshModelsIfDue(forceModels);
 
     if (hadSuccess) {
@@ -1369,7 +1520,7 @@ function scheduleRefresh() {
 }
 
 function strategyNeedsTarget(strategy) {
-  return TARGETED_STRATEGIES.has(strategy);
+  return targetedStrategies.has(strategy);
 }
 
 async function applyManualOverride() {
@@ -1575,6 +1726,7 @@ function resetEffects() {
 function bindEvents() {
   document.getElementById("stepBtn").onclick = () => runControl("/api/control/step", uploadStatusEl, "Step complete", true);
   document.getElementById("startBtn").onclick = () => runControl("/api/control/start", uploadStatusEl, "Battle started", true);
+  document.getElementById("pauseBtn").onclick = () => runControl("/api/control/pause", uploadStatusEl, "Battle paused", false);
   document.getElementById("endBtn").onclick = () => runControl("/api/control/end", uploadStatusEl, "Battle ended", true);
 
   document.getElementById("resetBtn").onclick = async () => {
@@ -1647,7 +1799,7 @@ setupMapInteractions();
 bindEvents();
 resizeCanvas();
 renderAll();
-refreshAll(true).catch((error) => {
+refreshMeta().then(() => refreshAll(true)).catch((error) => {
   state.ui.lastRefreshError = error.message;
   scheduleRefresh();
 });

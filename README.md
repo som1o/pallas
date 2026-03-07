@@ -1,6 +1,14 @@
 # Pallas
 
-**Pallas** is a geopolitical and military strategy AI simulation framework built in C++. It trains feedforward neural networks to act as autonomous nation-state decision-makers within a deterministic, fixed-point world simulation. Models learn to select from a vocabulary of 26 diplomatic and military actions based on a 90-dimensional representation of world state, enabling rigorous evaluation of AI strategic behavior under varied geopolitical conditions.
+**Pallas** is a geopolitical strategy simulation and model-training framework built in C++ for users who want more than a toy battlefield and more than a black-box AI demo. It is designed as a full operational stack where deterministic simulation, policy learning, live command-and-control visibility, and reproducible evaluation all work together in one codebase.
+
+At its core, Pallas models a world of AI-governed countries competing, negotiating, escalating, recovering, and adapting over time. Every simulation tick is meaningful: military posture shifts, supply and logistics constraints propagate, diplomatic treaties form and break, strategic pressure changes, and model decisions produce visible consequences in both state trajectories and leaderboard outcomes.
+
+The project is intentionally engineered for serious iteration loops. You can train models with configurable architecture and optimization controls, deploy those models directly into a live battle runtime, hot-swap uploaded `.bin` weights per country, inspect world state and diagnostics through REST APIs and the Warroom UI, and then replay outcomes frame by frame to understand exactly what happened and why.
+
+Pallas is built around deterministic fixed-point world math so experiments are repeatable and debuggable. This makes it practical for benchmarking, regression validation, tournament-style ranking, and scenario-bank evaluation, rather than relying on unstable one-off runs. In other words, Pallas is not just about generating interesting battles; it is about producing reliable strategic AI workflows you can measure, compare, and improve.
+
+If your goal is to research model behavior under pressure, run controlled strategic simulations, or build a robust training-to-deployment pipeline for geopolitical action policies, Pallas gives you a complete foundation: simulation engine, model runtime, web observability layer, replay tooling, benchmark harnesses, and distributed execution support.
 
 ---
 
@@ -13,19 +21,20 @@
 - [Building](#building)
 - [Project Structure](#project-structure)
 - [Binaries and Usage](#binaries-and-usage)
-  - [pallas — Training](#pallas--training)
-  - [pallas_battle — Battle Server](#pallas_battle--battle-server)
-  - [pallas_replay — Replay Viewer](#pallas_replay--replay-viewer)
-  - [pallas_tests — Unit Tests](#pallas_tests--unit-tests)
+  - [pallas - Training](#pallas---training)
+  - [pallas_battle - Battle Server](#pallas_battle---battle-server)
+  - [pallas_replay - Replay Reader](#pallas_replay---replay-reader)
+  - [pallas_tests - Unit Tests](#pallas_tests---unit-tests)
 - [Web Interface](#web-interface)
+- [REST API](#rest-api)
 - [Scenario Configuration](#scenario-configuration)
 - [Model Configuration](#model-configuration)
 - [Training Configuration](#training-configuration)
 - [Class Weights](#class-weights)
 - [Model Zoo](#model-zoo)
 - [Distributed Mode](#distributed-mode)
-- [Plugin System](#plugin-system)
 - [Tournament Mode](#tournament-mode)
+- [Plugin System](#plugin-system)
 - [Data Formats](#data-formats)
 - [Environment Variables](#environment-variables)
 - [License](#license)
@@ -34,400 +43,470 @@
 
 ## Overview
 
-Pallas simulates a world populated by nation-states, each governed by an AI model. At every simulation tick, each model receives a feature vector encoding that nation's military posture, economic indicators, diplomatic relationships, terrain conditions, and intelligence assessments. The model then selects the action it believes maximises its strategic position. Observed outcomes are recorded to a training corpus, which is subsequently used to further refine model weights.
+Pallas simulates a world of nation-states where each country can be controlled by an AI model. On each simulation tick, the runtime gathers world/country features, asks the active model to produce a strategic action, coordinates diplomatic/military interactions, applies outcomes, and advances simulation state.
 
-The framework supports single-machine training and evaluation, live browser-based visualisation via the built-in Warroom interface, binary replay logging, round-robin tournament evaluation, and optionally a distributed multi-node simulation cluster communicated over UDP.
+The project supports two major loops:
+
+- **Training loop (`pallas`)**: generate or load battle data, train policy/value heads, validate, checkpoint, and benchmark.
+- **Battle loop (`pallas_battle`)**: run live battles (turn-based and continuous), upload model binaries at runtime, inspect outcomes via browser UI/API, and record replay logs.
 
 ---
 
 ## Features
 
-- **Neural network training** — Multilayer perceptron trained with Adam optimiser, cosine LR schedule, label smoothing, and configurable per-class loss weighting.
-- **Deterministic simulation** — All world state arithmetic uses fixed-point representation (scale = 1000) to guarantee reproducibility across platforms.
-- **26-action decision space** — Covering the full spectrum from diplomatic negotiation and trade agreements to cyber operations, conventional warfare, and nuclear escalation.
-- **Web-based Warroom UI** — Single-page browser application served directly by `pallas_battle`, providing real-time map rendering, playback controls, and country detail panels.
-- **Binary replay logging** — Every tick's state and model decisions are serialised to a compact binary log for offline review and regression testing.
-- **Tournament mode** — Round-robin evaluation across a pool of models with an automatically generated leaderboard and JSON results export.
-- **Distributed simulation** — Partitioned world simulation across multiple nodes using raw UDP messaging.
-- **Model zoo** — Versioned model snapshots keyed by architecture hash, with a TSV manifest recording training metadata.
-- **Plugin system** — Shared library (`.so`) plug-ins for extending the strategy tool registry at runtime.
+- **Deterministic world engine** with fixed-point arithmetic for stable reproducibility.
+- **26 strategy actions** spanning diplomacy, military, cyber, trade, internal politics, and escalation.
+- **Battle readiness gating** that ensures each country has a loaded `.bin` model before running.
+- **Live web Warroom** served directly by the embedded HTTP server (`web/index.html`, `web/app.js`, `web/style.css`).
+- **Model hot-swap uploads** per model/team/country via `/api/upload-model`.
+- **Replay logging** (`battle_replay.bin`) for post-run analysis with `pallas_replay`.
+- **Distributed battle mode** with UDP decision exchange between nodes.
+- **Scenario-bank benchmark support** with JSON + TSV reports.
+- **Round-robin tournament mode** with persisted leaderboard output.
+- **Plugin support** for runtime strategy tooling (`plugins/default_tools.cpp`).
 
 ---
 
 ## Architecture
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                        pallas_core (static library)          │
-│                                                              │
-│  Model ─── Tensor ─── Linear                                 │
-│  SimulationEngine ─── World ─── Country ─── MilitaryPower    │
-│  BattleRuntime ─── BattleServer                              │
-│  ScenarioConfig ─── Tournament                               │
-│  DataPipeline ─── DataLoader                                 │
-│  ToolRegistry ─── Plugin Loader                              │
-└──────────────┬──────────────┬──────────────┬────────────────┘
-               │              │              │
-          pallas         pallas_battle  pallas_replay
-         (trainer)       (HTTP server   (CLI replay
-                         + sim loop)     viewer)
+```text
+pallas_core (static library)
+  |- model / tensor / linear
+  |- simulation_engine
+  |- scenario_config
+  |- battle_runtime
+  |- battle_server
+  |- data_pipeline / dataloader
+  |- tournament / tool_registry
+
+Executables
+  |- pallas         (trainer + benchmark runner)
+  |- pallas_battle  (battle runtime + HTTP + web assets)
+  |- pallas_replay  (replay reader)
+  |- pallas_tests   (unit tests)
 ```
 
-The simulation engine maintains a priority-queue of scheduled events and advances the world tick-by-tick. At each tick, each living nation invokes its assigned `Model::decide()` with a fresh `CountrySnapshot` feature vector. The resulting action is dispatched to the appropriate handler, side-effects are applied to world state, and the (state, action) pair is optionally appended to the training corpus.
+High-level flow:
+
+1. Load model/train/scenario configs.
+2. Build world and model manager.
+3. Run ticks: gather decisions, coordinate, apply outcomes.
+4. Expose state via API and UI (battle runtime) or optimize weights (training runtime).
+5. Persist artifacts: model states, logs, replay, benchmark outputs.
 
 ---
 
 ## Prerequisites
 
-| Dependency | Minimum Version | Notes |
+| Dependency | Minimum | Notes |
 |---|---|---|
-| CMake | 3.10 | Build system |
-| C++ compiler | C++17 | GCC 8+ or Clang 7+ |
-| OpenMP | — | Parallel training loops; typically bundled with the compiler |
-| pthreads | — | POSIX threads |
-| Internet access (first build) | — | `FetchContent` downloads nlohmann/json v3.11.3 |
+| CMake | 3.10+ | Build generation |
+| C++ Compiler | C++17 | GCC/Clang with modern STL |
+| OpenMP | Compiler-provided | Parallel training loops |
+| pthreads | POSIX | Runtime threading |
 
 ---
 
 ## Building
 
 ```bash
-git clone https://github.com/your-org/pallas.git
+git clone https://github.com/som1o/pallas.git
 cd pallas
-mkdir build && cd build
-cmake ..
-make -j$(nproc)
+cmake -S . -B build
+cmake --build build -j4
 ```
 
-All build artifacts are placed inside the `build/` directory. The build system fetches [nlohmann/json](https://github.com/nlohmann/json) automatically if it is not already present in the build tree.
-
-To run the unit test suite after building:
+Run tests:
 
 ```bash
-cd build
-ctest --output-on-failure
+ctest --test-dir build --output-on-failure
 ```
 
 ---
 
 ## Project Structure
 
-```
+```text
 pallas/
-├── CMakeLists.txt          # Top-level build definition
-├── data/
-│   ├── model_config.json   # Neural network architecture settings
-│   ├── train_config.json   # Training hyperparameters
-│   ├── class_weights.txt   # Per-action loss weights
-│   ├── vocab.txt           # Action vocabulary (one token per line)
-│   ├── battle_train.json   # Training corpus (state → action pairs)
-│   ├── scenario_example.json
-│   └── model_zoo/
-│       └── manifest.tsv    # Versioned model snapshot index
-├── include/                # Public headers for all modules
-├── src/                    # Implementation files + binary entry points
-├── plugins/
-│   └── default_tools.cpp   # Default strategy tool plugin
-├── tests/
-│   ├── test_framework.h    # Lightweight test harness
-│   └── model_tests.cpp
-├── web/
-│   ├── index.html          # Warroom single-page application
-│   ├── app.js              # Map rendering and REST polling
-│   └── style.css
-└── logs/
-    └── uploads/
+|- CMakeLists.txt
+|- include/                  # public headers
+|- src/                      # implementation + mains
+|- data/
+|  |- class_weights.txt
+|  |- model_config.json
+|  |- train_config.json
+|  |- scenario_example.json
+|  |- model_zoo/
+|  |  |- manifest.tsv
+|  |- scenario_bank/
+|- plugins/
+|  |- default_tools.cpp
+|- web/
+|  |- index.html
+|  |- app.js
+|  |- style.css
+|- tests/
+|  |- model_tests.cpp
+|  |- test_framework.h
+|- logs/
 ```
 
 ---
 
 ## Binaries and Usage
 
-### pallas — Training
+### pallas - Training
 
-The primary training binary. Loads the world simulation, generates or loads battle data, trains the model, and optionally evaluates performance.
-
-```
-./pallas [OPTIONS]
-```
-
-| Option | Default | Description |
-|---|---|---|
-| `--train-only` | — | Execute only the training phase; skip all evaluation |
-| `--resume [path]` | `../data/best_state.bin` | Resume training from a saved model state |
-| `--rebuild-battle-data` | — | Regenerate the training corpus from a fresh simulation run |
-| `--model-zoo-dir <path>` | `../data/model_zoo` | Directory used for versioned model snapshots |
-| `--log-dir <path>` | `../logs` | Directory for training logs and metric output |
-| `--data-dir <path>` | `../data` | Root data directory (overridden by `$PALLAS_DATA_DIR`) |
-| `--inspect-model <path>` | — | Print model architecture details without training |
-
-**Example — resume training and write logs to a custom directory:**
+Main trainer entrypoint (`src/main.cpp`).
 
 ```bash
-./pallas --resume ../data/checkpoint.bin --log-dir ../logs/run_03
+./build/pallas [options]
+```
+
+| Option | Description |
+|---|---|
+| `--train-only` | Train and skip evaluation stages |
+| `--resume [path]` | Resume from model state (default `../data/best_state.bin`) |
+| `--rebuild-battle-data` | Regenerate battle data before training |
+| `--model-zoo-dir <path>` | Override model zoo directory |
+| `--log-dir <path>` | Override logs output directory |
+| `--data-dir <path>` | Override data directory |
+| `--inspect-model <path>` | Inspect serialized model architecture |
+| `--benchmark-only` | Skip training, run benchmark only |
+| `--benchmark-model <path>` | Model used for benchmark-only mode |
+| `--benchmark-bank <path>` | Scenario bank directory |
+| `--benchmark-report <path>` | Benchmark report output JSON path |
+
+Examples:
+
+```bash
+./build/pallas --rebuild-battle-data --log-dir ../logs/run_20260307
+./build/pallas --benchmark-only --benchmark-model ../data/best_state.bin --benchmark-bank ../data/scenario_bank
 ```
 
 ---
 
-### pallas_battle — Battle Server
+### pallas_battle - Battle Server
 
-Runs the battle simulation loop and serves the Warroom browser interface and REST API over HTTP. Optionally executes round-robin tournaments between loaded models.
+Battle runtime + embedded HTTP server (`src/battle_main.cpp`).
 
-```
-./pallas_battle [OPTIONS]
+```bash
+./build/pallas_battle [options]
 ```
 
 | Option | Default | Description |
 |---|---|---|
-| `--port <n>` | 8080 | TCP port for the embedded HTTP server |
-| `--web-root <path>` | `../web` | Root directory for static web assets |
-| `--replay <path>` | `../logs/battle_replay.bin` | Output path for the binary replay log |
-| `--scenario <path>` | — | JSON scenario file to load at startup |
-| `--tournament` | — | Run a round-robin tournament instead of a live battle |
-| `--tournament-rounds <n>` | 1 | Number of rounds per tournament |
-| `--tournament-output <path>` | `../logs/tournament_results.json` | JSON file for tournament leaderboard output |
-| `--distributed-node-id <n>` | 0 | This node's identifier within a distributed cluster |
-| `--distributed-total-nodes <n>` | 1 | Total number of nodes in the cluster |
-| `--distributed-bind-host <h>` | `0.0.0.0` | UDP interface to bind for cluster communication |
-| `--distributed-bind-port <n>` | 19090 | UDP port to bind for cluster communication |
-| `--distributed-peers <csv>` | — | Comma-separated list of peer addresses (`host:port`) |
+| `--port <n>` | `8080` | HTTP server port |
+| `--web-root <path>` | `../web` | Static web asset root |
+| `--replay <path>` | `../logs/battle_replay.bin` | Replay output path |
+| `--scenario <path>` | (default scenario) | Load scenario JSON |
+| `--tournament` | off | Run round-robin mode and exit |
+| `--tournament-rounds <n>` | `1` | Tournament rounds |
+| `--tournament-output <path>` | `../logs/tournament_results.json` | Tournament result file |
+| `--distributed-node-id <n>` | `0` | Node ID |
+| `--distributed-total-nodes <n>` | `1` | Total cluster nodes |
+| `--distributed-bind-host <host>` | `0.0.0.0` | UDP bind host |
+| `--distributed-bind-port <n>` | `19090` | UDP bind port |
+| `--distributed-timeout-ms <n>` | `40` | UDP receive timeout |
+| `--distributed-peers <csv>` | empty | Peer list (`host:port,host:port`) |
 
-**Example — start a battle on port 9000 with a custom scenario:**
+Example:
 
 ```bash
-./pallas_battle --port 9000 --scenario ../data/scenario_example.json
+./build/pallas_battle --port 8080 --scenario ../data/scenario_example.json --replay ../logs/battle_replay.bin
 ```
 
-Then open `http://localhost:9000` in a browser to access the Warroom.
+Open `http://127.0.0.1:8080` for the Warroom UI.
 
 ---
 
-### pallas_replay — Replay Viewer
+### pallas_replay - Replay Reader
 
-Reads a binary replay log and prints per-tick state summaries to standard output. Useful for post-hoc analysis and regression verification.
+CLI replay inspector (`src/replay_main.cpp`).
 
-```
-./pallas_replay [OPTIONS]
+```bash
+./build/pallas_replay [options]
 ```
 
 | Option | Default | Description |
 |---|---|---|
-| `--log <path>` | `../logs/battle_replay.bin` | Binary replay file to read |
-| `--ticks <n>` | unlimited | Maximum number of ticks to display |
+| `--log <path>` | `../logs/battle_replay.bin` | Replay file |
+| `--ticks <n>` | unlimited | Stop after N ticks |
 
-**Example — inspect the first 200 ticks of a replay:**
+Example:
 
 ```bash
-./pallas_replay --log ../logs/battle_replay.bin --ticks 200
+./build/pallas_replay --log ../logs/battle_replay.bin --ticks 100
 ```
 
 ---
 
-### pallas_tests — Unit Tests
-
-The test binary is registered with CTest. Run it via:
+### pallas_tests - Unit Tests
 
 ```bash
-cd build
-ctest --output-on-failure
-# or directly:
-./pallas_tests
+./build/pallas_tests
+# or
+ctest --test-dir build --output-on-failure
 ```
-
-Tests cover model forward/backward passes, fixed-point arithmetic, tensor operations, and scenario loading.
 
 ---
 
 ## Web Interface
 
-The **Pallas Warroom** is a single-page application served at the root of the `pallas_battle` HTTP server. No external web server is required.
+Warroom tabs:
 
-The Warroom is divided into four tabs:
+- **Overview**: step/start/pause/end/reset, duration/tick-rate controls, diagnostics, map tag summary.
+- **Models**: readiness status, per-country upload cards, hierarchy view, finalists/eliminations, load errors.
+- **Details**: leaderboard, theater snapshot, messages, decision stream.
+- **ComCent**: manual override command panel.
 
-| Tab | Purpose |
-|---|---|
-| **Overview** | Start, step, pause, reset, and end the current battle. Adjust tick rate and simulation duration. |
-| **Models** | Inspect loaded AI models, their architecture hashes, and action distribution statistics. |
-| **Details** | View per-country state including military power, economic indicators, diplomatic stance, and active treaties. |
-| **ComCent** | Command centre panel for issuing manual diplomatic or military orders and observing event logs. |
+The map renderer now uses:
 
-The map canvas in `app.js` renders the terrain grid, country ownership, and unit positions by polling the REST API exposed by `pallas_battle`.
+- `map.cells` for ownership
+- `map.tags` for sea/strategic/chokepoints/ports/pass/crossing overlays
+- `map.sea_zones` for naval zone tinting
+
+---
+
+## REST API
+
+All routes are served by `pallas_battle`.
+
+Read routes:
+
+- `GET /api/state`
+- `GET /api/leaderboard`
+- `GET /api/models`
+- `GET /api/diagnostics`
+- `GET /api/meta`
+
+Control routes:
+
+- `POST /api/control/step`
+- `POST /api/control/start`
+- `POST /api/control/pause`
+- `POST /api/control/end`
+- `POST /api/control/reset`
+- `POST /api/control/speed?ticks_per_second=<float>`
+- `POST /api/control/duration?seconds=<u64>`
+- `POST /api/control/duration?min_seconds=<u64>&max_seconds=<u64>`
+- `POST /api/control/override?actor_country_id=<u16>&target_country_id=<u16>&strategy=<name>&terms_type=<text>&terms_details=<text>`
+
+Upload route:
+
+- `POST /api/upload-model?name=<model>`
+- `POST /api/upload-model?team=<team>`
+- `POST /api/upload-model?country_id=<id>&label=<name>`
+
+`/api/meta` includes machine-readable strategy list, targeted strategies, API version, upload limits, and route groups used by the web app.
+
+Notes:
+
+- Control routes can be protected with origin/token checks.
+- Upload body is raw binary model state (`.bin`).
 
 ---
 
 ## Scenario Configuration
 
-Scenarios are defined as JSON files. A minimal scenario specifies a random seed, tick parameters, a map grid, and a list of countries with their initial state. See `data/scenario_example.json` for a fully annotated reference.
+Reference: `data/scenario_example.json`
 
-Key top-level fields:
+Top-level fields:
 
 ```json
 {
-  "seed": 42,
-  "max_ticks": 2000,
-  "tick_interval_ms": 100,
-  "map": { "width": 32, "height": 32, "cells": [ ... ] },
+  "seed": 20260307,
+  "tick_seconds": 3600,
+  "ticks_per_match": 220,
+  "map": {
+    "width": 24,
+    "height": 12,
+    "cells": [0, 1, 2],
+    "tags": [0, 1, 66],
+    "sea_zones": [0, 1, 2]
+  },
+  "models": [
+    {"name": "aster_ai", "team": "aster", "model_path": ""}
+  ],
   "countries": [
     {
       "id": 1,
-      "name": "Arandis",
-      "military": { ... },
-      "economy": { ... },
-      "diplomacy": { "stance": "Neutral", "treaties": [ ... ] },
-      "model_path": "../data/best_state.bin"
+      "name": "Aster",
+      "controller": "aster_ai",
+      "adjacent": [2],
+      "defense_pacts": [],
+      "non_aggression_pacts": [2],
+      "trade_treaties": [2],
+      "intel_on_enemy": {"2": 56}
     }
   ]
 }
 ```
 
-Countries that do not specify a `model_path` will act randomly.
+`map.tags` bit flags (`include/simulation_engine.h`):
+
+- `1` sea
+- `2` strategic
+- `4` chokepoint strait
+- `8` chokepoint canal
+- `16` mountain pass
+- `32` river crossing
+- `64` port
 
 ---
 
 ## Model Configuration
 
-Neural network architecture is controlled by `data/model_config.json`:
+Reference: `data/model_config.json`
 
 ```json
 {
   "hidden_layers": [512, 384, 256, 192],
-  "activation": "leaky_relu",
+  "activation": "relu",
   "norm": "layernorm",
   "use_dropout": true,
-  "dropout_prob": 0.1,
-  "leaky_relu_alpha": 0.02
+  "dropout_prob": 0.08,
+  "leaky_relu_alpha": 0.01
 }
 ```
 
-| Field | Description |
-|---|---|
-| `hidden_layers` | List of hidden layer widths. Input is 90-dimensional; output is 26 (one logit per action). |
-| `activation` | Activation function. Supported: `relu`, `leaky_relu`, `tanh`. |
-| `norm` | Normalisation layer. Supported: `layernorm`, `none`. |
-| `use_dropout` | Whether to apply dropout during training. |
-| `dropout_prob` | Dropout keep probability. |
-| `leaky_relu_alpha` | Negative slope coefficient when `activation` is `leaky_relu`. |
+Validation rules include:
+
+- `hidden_layers` must be non-empty and > 0
+- `activation` in `{relu, sigmoid, tanh, leaky_relu}`
+- `norm` in `{layernorm, batchnorm, none}`
+- `dropout_prob` in `[0,1)`
+- `leaky_relu_alpha >= 0`
 
 ---
 
 ## Training Configuration
 
-Training hyperparameters are read from `data/train_config.json`:
+Reference: `data/train_config.json`
 
 ```json
 {
-  "epochs": 28,
+  "epochs": 32,
   "batch_size": 64,
-  "validation_split": 0.12,
-  "early_stopping_patience": 7,
-  "base_lr": 0.0007,
+  "validation_split": 0.15,
+  "early_stopping_patience": 8,
+  "base_lr": 0.0006,
   "optimizer": "adam",
-  "weight_decay": 0.00015,
-  "adam_beta1": 0.9,
-  "adam_beta2": 0.999,
-  "adam_epsilon": 1e-8,
+  "weight_decay": 0.00012,
   "scheduler": "cosine",
-  "step_size": 8,
-  "gamma": 0.92,
-  "min_lr": 0.000005,
+  "step_size": 6,
+  "gamma": 0.94,
+  "min_lr": 0.00001,
   "label_smoothing": 0.02,
   "use_class_weights": true,
-  "class_weights_path": "../data/class_weights.txt"
+  "class_weights_path": "../data/class_weights.txt",
+  "use_actor_critic": true,
+  "policy_loss_weight": 1.0,
+  "value_loss_weight": 0.5,
+  "reward_scale": 1.0,
+  "entropy_coeff": 0.012
 }
 ```
+
+Validation rules include:
+
+- `epochs`, `batch_size`, `early_stopping_patience` > 0
+- `optimizer` in `{adam, sgd}`
+- `scheduler` in `{step, exponential, cosine}`
+- `validation_split` in `[0.01, 0.5]`
+- `min_lr` in `[0, base_lr]`
+- non-negative decay/smoothing/entropy/value loss terms
 
 ---
 
 ## Class Weights
 
-`data/class_weights.txt` assigns a scalar loss multiplier to each action token to compensate for class imbalance and to bias training toward or away from particular behaviours. Each line has the format `<action_name> <weight>`.
+Reference: `data/class_weights.txt`
 
-Higher weights cause the model to penalise mispredictions of that action more heavily, increasing its propensity to select those actions in ambiguous states. The currently configured weights are tuned for aggressive strategic posturing; escalatory actions such as `coup_attempt`, `tactical_nuke`, `strategic_nuke`, and `impose_embargo` carry elevated weights.
+Format:
+
+```text
+<action_name> <weight>
+```
+
+The file now uses a neutral-balanced profile centered near `1.0` so the trainer does not over-bias escalatory actions by default.
+
+Actions are mapped in `src/main.cpp` and must match known tokens, including:
+
+- `attack`, `defend`, `negotiate`, `surrender`
+- `form_alliance`, `sign_trade_agreement`, `impose_embargo`
+- `coup_attempt`, `tactical_nuke`, `strategic_nuke`, `cyber_attack`
+- and the full 26-action vocabulary
 
 ---
 
 ## Model Zoo
 
-Trained model snapshots are stored under `data/model_zoo/` and tracked in `manifest.tsv`. Each entry records:
+Model snapshots are stored under `data/model_zoo/`.
 
-- Architecture hash (derived from layer dimensions and activation configuration)
-- Training epoch and validation loss at the time of saving
-- Timestamp and originating data directory
-
-To point the trainer at a custom zoo location:
-
-```bash
-./pallas --model-zoo-dir /mnt/storage/pallas_models
-```
+- Metadata index: `data/model_zoo/manifest.tsv`
+- Custom location: `--model-zoo-dir <path>`
 
 ---
 
 ## Distributed Mode
 
-`pallas_battle` supports partitioning the country simulation across multiple nodes. Each node owns a disjoint subset of countries and communicates state deltas to its peers via UDP.
+Each node runs `pallas_battle` with a partition ID and peer list. Nodes exchange decisions over UDP.
 
-**Example — two-node cluster:**
+Example (2 nodes):
 
 Node 0:
+
 ```bash
-./pallas_battle --distributed-node-id 0 --distributed-total-nodes 2 \
-  --distributed-bind-host 0.0.0.0 --distributed-bind-port 19090 \
-  --distributed-peers 192.168.1.11:19090
+./build/pallas_battle --distributed-node-id 0 --distributed-total-nodes 2 --distributed-bind-host 0.0.0.0 --distributed-bind-port 19090 --distributed-peers 192.168.1.11:19090
 ```
 
 Node 1:
+
 ```bash
-./pallas_battle --distributed-node-id 1 --distributed-total-nodes 2 \
-  --distributed-bind-host 0.0.0.0 --distributed-bind-port 19090 \
-  --distributed-peers 192.168.1.10:19090
+./build/pallas_battle --distributed-node-id 1 --distributed-total-nodes 2 --distributed-bind-host 0.0.0.0 --distributed-bind-port 19090 --distributed-peers 192.168.1.10:19090
 ```
 
-All nodes must be started with identical scenario files and seeds to ensure deterministic world initialisation before the first synchronisation tick.
-
----
-
-## Plugin System
-
-Custom strategy tools can be loaded at runtime as shared libraries. Plugins must implement the `ToolRegistry` interface defined in `include/tool_registry.h`. The default plugin is built alongside the main targets:
-
-```
-build/default_tools_plugin.dir/  → libdefault_tools.so
-```
-
-To load a custom plugin, set the tool registry path in the scenario configuration or pass it programmatically before simulation start.
+Use identical scenario/seed across nodes for deterministic startup alignment.
 
 ---
 
 ## Tournament Mode
 
-Tournament mode runs a full round-robin contest among all models registered in a scenario, accumulating win/loss/draw statistics over one or more rounds.
+Run round-robin and write JSON standings:
 
 ```bash
-./pallas_battle \
-  --tournament \
-  --tournament-rounds 5 \
-  --scenario ../data/scenario_example.json \
-  --tournament-output ../logs/results.json
+./build/pallas_battle --tournament --tournament-rounds 5 --scenario ../data/scenario_example.json --tournament-output ../logs/tournament_results.json
 ```
 
-Results are written to a JSON file containing a leaderboard sorted by win rate, along with per-matchup outcome matrices and aggregate action distribution statistics.
+---
+
+## Plugin System
+
+Default tool plugin source:
+
+- `plugins/default_tools.cpp`
+
+Core registry interfaces:
+
+- `include/tool_registry.h`
 
 ---
 
 ## Data Formats
 
-| File | Format | Description |
+| File | Type | Purpose |
 |---|---|---|
-| `battle_train.json` | JSON array | Training corpus; each entry is a `(state_vector, action_index)` pair |
-| `battle_train.txt` | Text | Human-readable equivalent of the training corpus |
-| `battle_replay.bin` | Binary | Tick-indexed replay log; each frame records full country state and model decisions |
-| `model_zoo/manifest.tsv` | TSV | Index of saved model versions with metadata |
-| `vocab.txt` | Text | Ordered list of the 26 action tokens (one per line) |
-| `class_weights.txt` | Text | Per-action loss weight, space-separated: `<action> <weight>` |
-| `scenario_example.json` | JSON | Reference scenario configuration |
-| `model_config.json` | JSON | Neural network architecture definition |
-| `train_config.json` | JSON | Training hyperparameters |
-| `*.bin` model states | Binary | Serialised model weights + architecture hash + training metadata |
+| `data/model_config.json` | JSON | Model architecture/config |
+| `data/train_config.json` | JSON | Trainer hyperparameters |
+| `data/class_weights.txt` | Text | Action loss multipliers |
+| `data/scenario_example.json` | JSON | Scenario schema reference |
+| `data/scenario_bank/*.json` | JSON | Benchmark/tournament scenario set |
+| `data/model_zoo/manifest.tsv` | TSV | Snapshot index |
+| `logs/battle_replay.bin` | Binary | Replay frames |
+| `logs/tournament_results.json` | JSON | Tournament output |
+| `logs/scenario_benchmark.json` | JSON | Benchmark aggregate report |
+| `logs/scenario_benchmark.tsv` | TSV | Benchmark leaderboard table |
 
 ---
 
@@ -435,10 +514,13 @@ Results are written to a JSON file containing a leaderboard sorted by win rate, 
 
 | Variable | Description |
 |---|---|
-| `PALLAS_DATA_DIR` | Overrides the default `../data` data directory path for all binaries |
+| `PALLAS_DATA_DIR` | Overrides trainer data root |
+| `PALLAS_ALLOWED_ORIGIN` | Restricts control/upload route CORS origin |
+| `PALLAS_CONTROL_TOKEN` | Enables bearer/header/query token auth for control/upload routes |
+| `PALLAS_MAX_UPLOAD_BYTES` | Max binary upload payload size for `/api/upload-model` |
 
 ---
 
 ## License
 
-This project is released under the terms of the license found in the [LICENSE](LICENSE) file at the root of the repository.
+See [LICENSE](LICENSE).

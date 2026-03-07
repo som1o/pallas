@@ -5,8 +5,26 @@
 
 namespace battle_common {
 
-constexpr size_t kBattleInputDim = 90;
-constexpr size_t kBattleOutputDim = 26;
+constexpr size_t kBattleBaseInputDim = 90;
+constexpr size_t kBattleTemporalWindow = 8;
+constexpr size_t kBattleInputDim = kBattleBaseInputDim * kBattleTemporalWindow;
+
+constexpr size_t kBattlePolicyActionDim = 26;
+constexpr size_t kBattleStrategicGoalDim = 4;  // attack, defend, trade, develop
+constexpr size_t kBattleTacticalTargetBucketDim = 3;
+constexpr size_t kBattleCommitmentBucketDim = 3;
+constexpr size_t kBattleAllocationBucketDim = 3;
+constexpr size_t kBattleOpponentActionDim = 26;
+constexpr size_t kBattleValueDim = 1;
+
+constexpr size_t kBattleHeadPolicyOffset = 0;
+constexpr size_t kBattleHeadStrategicOffset = kBattleHeadPolicyOffset + kBattlePolicyActionDim;
+constexpr size_t kBattleHeadTargetBucketOffset = kBattleHeadStrategicOffset + kBattleStrategicGoalDim;
+constexpr size_t kBattleHeadCommitmentOffset = kBattleHeadTargetBucketOffset + kBattleTacticalTargetBucketDim;
+constexpr size_t kBattleHeadAllocationOffset = kBattleHeadCommitmentOffset + kBattleCommitmentBucketDim;
+constexpr size_t kBattleHeadOpponentOffset = kBattleHeadAllocationOffset + kBattleAllocationBucketDim;
+constexpr size_t kBattleHeadValueOffset = kBattleHeadOpponentOffset + kBattleOpponentActionDim;
+constexpr size_t kBattleOutputDim = kBattleHeadValueOffset + kBattleValueDim;
 
 enum BattleAction : size_t {
 	kActionAttack = 0,

@@ -1,8 +1,8 @@
 {
   "hidden_layers": [512, 384, 256, 192],
-  "activation": "leaky_relu",
+  "activation": "relu",
   "norm": "layernorm",
   "use_dropout": true,
-  "dropout_prob": 0.1,
-  "leaky_relu_alpha": 0.02
+  "dropout_prob": 0.08,
+  "leaky_relu_alpha": 0.01
 }

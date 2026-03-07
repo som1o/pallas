@@ -4,12 +4,16 @@
 
 BattleBatchLoader::BattleBatchLoader(const std::vector<std::array<float, battle_common::kBattleInputDim>>* features,
                                      const std::vector<uint32_t>* actions,
+                                                                         const std::vector<float>* outcomes,
+                                                                         const std::vector<float>* rewards,
                                      const std::vector<size_t>& indices,
                                      size_t batch_size,
                                      bool shuffle,
                                      uint32_t seed)
     : features_(features),
       actions_(actions),
+            outcomes_(outcomes),
+            rewards_(rewards),
       batch_size_(batch_size),
       indices_(indices),
       cursor_(0),
@@ -23,8 +27,11 @@ void BattleBatchLoader::reset() {
     }
 }
 
-bool BattleBatchLoader::next(Tensor& inputs, std::vector<uint32_t>& targets) {
-    if (features_ == nullptr || actions_ == nullptr || cursor_ >= indices_.size()) {
+bool BattleBatchLoader::next(Tensor& inputs,
+                             std::vector<uint32_t>& targets,
+                             std::vector<float>& outcomes,
+                             std::vector<float>& rewards) {
+    if (features_ == nullptr || actions_ == nullptr || outcomes_ == nullptr || rewards_ == nullptr || cursor_ >= indices_.size()) {
         return false;
     }
 
@@ -32,10 +39,13 @@ bool BattleBatchLoader::next(Tensor& inputs, std::vector<uint32_t>& targets) {
     const size_t batch = std::min(batch_size_, remaining);
     inputs = Tensor({batch, battle_common::kBattleInputDim}, 0.0f);
     targets.assign(batch, 0);
+    outcomes.assign(batch, 0.0f);
+    rewards.assign(batch, 0.0f);
 
     for (size_t row = 0; row < batch; ++row) {
         const size_t sample_idx = indices_[cursor_ + row];
-        if (sample_idx >= features_->size() || sample_idx >= actions_->size()) {
+        if (sample_idx >= features_->size() || sample_idx >= actions_->size() ||
+            sample_idx >= outcomes_->size() || sample_idx >= rewards_->size()) {
             continue;
         }
 
@@ -44,6 +54,8 @@ bool BattleBatchLoader::next(Tensor& inputs, std::vector<uint32_t>& targets) {
             inputs.data[row * battle_common::kBattleInputDim + col] = sample[col];
         }
         targets[row] = (*actions_)[sample_idx];
+        outcomes[row] = (*outcomes_)[sample_idx];
+        rewards[row] = (*rewards_)[sample_idx];
     }
 
     cursor_ += batch;

@@ -21,11 +21,16 @@ struct CountryStateCommon {
     int64_t logistics_milli = 0;
     int64_t intelligence_milli = 0;
     int64_t industry_milli = 0;
+    int64_t industrial_capital_milli = 0;
+    int64_t labor_participation_milli = 0;
+    int64_t technology_multiplier_milli = 0;
+    int64_t gdp_output_milli = 0;
     int64_t technology_milli = 0;
     int64_t resource_reserve_milli = 0;
     int64_t supply_level_milli = 0;
     int64_t supply_capacity_milli = 0;
     int64_t trade_balance_milli = 0;
+    int64_t import_price_index_milli = 0;
     std::vector<uint16_t> trade_partner_ids;
     std::vector<uint16_t> defense_pact_ids;
     std::vector<uint16_t> non_aggression_pact_ids;
@@ -38,6 +43,10 @@ struct CountryStateCommon {
     int64_t faction_military_milli = 0;
     int64_t faction_industrial_milli = 0;
     int64_t faction_civilian_milli = 0;
+    int64_t war_economy_intensity_milli = 0;
+    int64_t industrial_decay_milli = 0;
+    int64_t debt_to_gdp_milli = 0;
+    int64_t war_bond_stock_milli = 0;
     int64_t coup_risk_milli = 0;
     int32_t election_cycle = 0;
     int64_t draft_level_milli = 0;

@@ -21,6 +21,7 @@
 #include <mutex>
 #include <set>
 #include <sstream>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace battle {
@@ -217,6 +218,21 @@ bool parse_endpoint(const std::string& endpoint, sockaddr_in* addr) {
     addr->sin_addr = ipv4->sin_addr;
     ::freeaddrinfo(result);
     return true;
+}
+
+uint64_t mix_u64(uint64_t value) {
+    value ^= value >> 33U;
+    value *= 0xff51afd7ed558ccdULL;
+    value ^= value >> 33U;
+    value *= 0xc4ceb9fe1a85ec53ULL;
+    value ^= value >> 33U;
+    return value;
+}
+
+double deterministic_noise_signed(uint64_t seed, uint64_t salt) {
+    const uint64_t mixed = mix_u64(seed ^ mix_u64(salt + 0x9e3779b97f4a7c15ULL));
+    const double unit = static_cast<double>(mixed % 100000ULL) / 100000.0;
+    return unit * 2.0 - 1.0;
 }
 
 std::string serialize_decision_packet(uint32_t node_id,
@@ -520,7 +536,7 @@ void ModelManager::add_model(const ManagedModel& managed_model) {
 
 std::vector<DecisionEnvelope> ModelManager::gather_decisions(const sim::World& world) const {
     std::vector<DecisionEnvelope> out;
-    const WorldSnapshot snapshot = build_world_snapshot(world);
+    std::unordered_map<uint16_t, WorldSnapshot> snapshot_by_observer;
 
     for (const ManagedModel& managed : models_) {
         if (!managed.model) {
@@ -535,7 +551,11 @@ std::vector<DecisionEnvelope> ModelManager::gather_decisions(const sim::World& w
             DecisionEnvelope envelope;
             envelope.model_name = managed.name;
             envelope.team = managed.team;
-            envelope.decision = managed.model->decide(snapshot, country_id);
+            auto snapshot_it = snapshot_by_observer.find(country_id);
+            if (snapshot_it == snapshot_by_observer.end()) {
+                snapshot_it = snapshot_by_observer.emplace(country_id, build_world_snapshot(world, country_id)).first;
+            }
+            envelope.decision = managed.model->decide(snapshot_it->second, country_id);
             out.push_back(std::move(envelope));
         }
     }
@@ -629,6 +649,43 @@ void ModelManager::apply_decisions(sim::World& world, const std::vector<Decision
         return non_aggression_edges.find(forward) != non_aggression_edges.end() && non_aggression_edges.find(reverse) != non_aggression_edges.end();
     };
 
+    auto deterministic_roll = [&](uint16_t actor_id, uint16_t target_id, Strategy strategy, uint64_t salt) {
+        const uint64_t key =
+            static_cast<uint64_t>(world.current_tick()) * 0x9e3779b97f4a7c15ULL +
+            static_cast<uint64_t>(actor_id) * 1315423911ULL +
+            static_cast<uint64_t>(target_id) * 2654435761ULL +
+            static_cast<uint64_t>(static_cast<uint8_t>(strategy)) * 2246822519ULL +
+            salt;
+        const uint64_t mixed = key ^ (key >> 33U) ^ (key << 13U);
+        return static_cast<double>(mixed % 10000ULL) / 10000.0;
+    };
+
+    auto dominant_faction = [](const sim::Country& actor) {
+        const double hawks = actor.faction_hawks.to_double();
+        const double liberals = actor.faction_economic_liberals.to_double();
+        const double nationalists = actor.faction_nationalists.to_double();
+        const double populists = actor.faction_populists.to_double();
+        if (hawks >= liberals && hawks >= nationalists && hawks >= populists) {
+            return 0;
+        }
+        if (liberals >= hawks && liberals >= nationalists && liberals >= populists) {
+            return 1;
+        }
+        if (nationalists >= hawks && nationalists >= liberals && nationalists >= populists) {
+            return 2;
+        }
+        return 3;
+    };
+
+    auto is_escalatory = [](Strategy strategy) {
+        return strategy == Strategy::Attack || strategy == Strategy::DeployUnits || strategy == Strategy::CyberAttack ||
+               strategy == Strategy::TacticalNuke || strategy == Strategy::StrategicNuke;
+    };
+
+    auto is_concession = [](Strategy strategy) {
+        return strategy == Strategy::HoldElections || strategy == Strategy::FocusEconomy || strategy == Strategy::Negotiate;
+    };
+
     for (const DecisionEnvelope& envelope : decisions) {
         for_each_action(envelope, [&](const ModelDecision& decision) {
         if (decision.actor_country_id == 0) {
@@ -640,7 +697,90 @@ void ModelManager::apply_decisions(sim::World& world, const std::vector<Decision
             return;
         }
 
-        switch (decision.strategy) {
+        Strategy strategy = decision.strategy;
+        const int dominant = dominant_faction(*actor);
+        const sim::InternalUnrestStage unrest = actor->unrest_stage;
+
+        // Dominant factions constrain available strategic choices.
+        if (dominant == 0) {
+            if (strategy == Strategy::HoldElections || strategy == Strategy::ReduceMilitaryUpkeep) {
+                strategy = Strategy::Defend;
+            }
+        } else if (dominant == 1) {
+            if (is_escalatory(strategy) || strategy == Strategy::ImposeEmbargo) {
+                strategy = Strategy::FocusEconomy;
+            }
+        } else if (dominant == 2) {
+            if (strategy == Strategy::SignTradeAgreement || strategy == Strategy::FormAlliance || strategy == Strategy::ProposeNonAggression) {
+                strategy = Strategy::ImposeEmbargo;
+            }
+        } else {
+            if (is_escalatory(strategy) && unrest >= sim::InternalUnrestStage::Strikes) {
+                strategy = Strategy::HoldElections;
+            }
+        }
+
+        // Unrest ladder forces specific response classes when instability deepens.
+        if (unrest >= sim::InternalUnrestStage::Strikes) {
+            const bool response_ok = strategy == Strategy::SuppressDissent || strategy == Strategy::HoldElections ||
+                                     strategy == Strategy::FocusEconomy || strategy == Strategy::Defend;
+            if (!response_ok) {
+                strategy = unrest >= sim::InternalUnrestStage::Riots ? Strategy::SuppressDissent : Strategy::FocusEconomy;
+            }
+        }
+
+        // Leader traits bias action selection away from raw model output.
+        const double aggressive = actor->leader_traits.aggressive.to_double() / 100.0;
+        const double diplomatic = actor->leader_traits.diplomatic.to_double() / 100.0;
+        const double corrupt = actor->leader_traits.corrupt.to_double() / 100.0;
+        const double competent = actor->leader_traits.competent.to_double() / 100.0;
+        const double roll = deterministic_roll(actor->id, decision.target_country_id, strategy, 0x5151ULL);
+
+        if ((strategy == Strategy::Defend || strategy == Strategy::Negotiate) && aggressive > 0.72 && roll < 0.34) {
+            strategy = decision.target_country_id == 0 ? Strategy::DeployUnits : Strategy::Attack;
+        } else if (is_escalatory(strategy) && diplomatic > 0.74 && roll < 0.42) {
+            strategy = Strategy::Negotiate;
+        } else if ((strategy == Strategy::DevelopTechnology || strategy == Strategy::InvestInResourceExtraction) && corrupt > 0.70 && roll < 0.38) {
+            strategy = Strategy::FocusEconomy;
+        } else if ((strategy == Strategy::StrategicNuke || strategy == Strategy::TacticalNuke) && competent > 0.72 && roll < 0.55) {
+            strategy = Strategy::RequestIntel;
+        }
+
+        if (actor->war_weariness > sim::Fixed::from_int(72)) {
+            if (actor->regime_type == sim::RegimeType::Democratic && is_escalatory(strategy)) {
+                strategy = Strategy::Negotiate;
+            } else if (actor->regime_type == sim::RegimeType::Authoritarian && is_escalatory(strategy) && unrest >= sim::InternalUnrestStage::Riots) {
+                strategy = Strategy::SuppressDissent;
+            }
+        }
+
+        // Policy choices feed back into faction influence each tick.
+        if (is_escalatory(strategy) || strategy == Strategy::SuppressDissent) {
+            actor->faction_hawks = std::min(sim::Fixed::from_int(100), actor->faction_hawks + sim::Fixed::from_double(0.9));
+            actor->faction_nationalists = std::min(sim::Fixed::from_int(100), actor->faction_nationalists + sim::Fixed::from_double(0.5));
+            actor->faction_economic_liberals = std::max(sim::Fixed::from_int(0), actor->faction_economic_liberals - sim::Fixed::from_double(0.6));
+            actor->faction_populists = std::max(sim::Fixed::from_int(0), actor->faction_populists - sim::Fixed::from_double(0.4));
+        } else if (strategy == Strategy::FocusEconomy || strategy == Strategy::SignTradeAgreement || strategy == Strategy::DevelopTechnology) {
+            actor->faction_economic_liberals = std::min(sim::Fixed::from_int(100), actor->faction_economic_liberals + sim::Fixed::from_double(0.9));
+            actor->faction_hawks = std::max(sim::Fixed::from_int(0), actor->faction_hawks - sim::Fixed::from_double(0.5));
+            actor->faction_populists = std::min(sim::Fixed::from_int(100), actor->faction_populists + sim::Fixed::from_double(0.2));
+        } else if (is_concession(strategy)) {
+            actor->faction_populists = std::min(sim::Fixed::from_int(100), actor->faction_populists + sim::Fixed::from_double(0.8));
+            actor->faction_hawks = std::max(sim::Fixed::from_int(0), actor->faction_hawks - sim::Fixed::from_double(0.4));
+        }
+
+        const double faction_sum = std::max(1.0,
+            actor->faction_hawks.to_double() + actor->faction_economic_liberals.to_double() +
+            actor->faction_nationalists.to_double() + actor->faction_populists.to_double());
+        actor->faction_hawks = sim::Fixed::from_double(actor->faction_hawks.to_double() * 100.0 / faction_sum);
+        actor->faction_economic_liberals = sim::Fixed::from_double(actor->faction_economic_liberals.to_double() * 100.0 / faction_sum);
+        actor->faction_nationalists = sim::Fixed::from_double(actor->faction_nationalists.to_double() * 100.0 / faction_sum);
+        actor->faction_populists = sim::Fixed::from_double(actor->faction_populists.to_double() * 100.0 / faction_sum);
+        actor->faction_military = actor->faction_hawks;
+        actor->faction_industrial = actor->faction_economic_liberals;
+        actor->faction_civilian = actor->faction_populists;
+
+        switch (strategy) {
             case Strategy::Attack: {
                 const uint16_t target = decision.target_country_id;
                 if (target == 0 || find_country(world, target) == nullptr) {
@@ -665,6 +805,9 @@ void ModelManager::apply_decisions(sim::World& world, const std::vector<Decision
                         target_country->allied_country_ids.erase(
                             std::remove(target_country->allied_country_ids.begin(), target_country->allied_country_ids.end(), decision.actor_country_id),
                             target_country->allied_country_ids.end());
+                        if (actor->coalition_id != 0 && actor->coalition_id == target_country->coalition_id) {
+                            actor->coalition_id = 0;
+                        }
                         target_country->civilian_morale = std::max(sim::Fixed::from_int(0), target_country->civilian_morale - sim::Fixed::from_double(2.0));
                     }
                     actor->civilian_morale = std::max(sim::Fixed::from_int(0), actor->civilian_morale - sim::Fixed::from_double(1.0));
@@ -675,24 +818,21 @@ void ModelManager::apply_decisions(sim::World& world, const std::vector<Decision
                 const uint32_t route_distance = static_cast<uint32_t>(
                     std::max<int>(1, static_cast<int>(actor->adjacent_country_ids.size()) + static_cast<int>(world.current_tick() % 3)));
 
-                world.schedule_event(std::make_unique<sim::AttackEvent>(
+                const int64_t offensive_window = std::clamp<int64_t>(
+                    actor->logistics_capacity.to_int() / 22 + static_cast<int64_t>(decision.force_commitment * 2.5f),
+                    2,
+                    6);
+                const uint32_t offensive_ticks = static_cast<uint32_t>(offensive_window);
+
+                // Persistent engagements start immediately and then self-schedule follow-up ticks.
+                const uint32_t seeded_route = route_distance + static_cast<uint32_t>(std::max(0.0, (1.0 - std::clamp(terrain_hint, 0.70, 1.18)) * 2.0));
+                const uint32_t seeded_ticks = offensive_ticks + (surprise_hint > 1.10 ? 1U : 0U);
+                world.schedule_event(std::make_unique<sim::OffensiveEvent>(
                                        decision.actor_country_id,
                                        target,
-                                       sim::Fixed::from_double(std::clamp(terrain_hint, 0.70, 1.18)),
-                                       sim::Fixed::from_double(std::clamp(surprise_hint, 0.70, 1.25)),
-                                       route_distance),
+                                       std::clamp<uint32_t>(seeded_ticks, 2, 6),
+                                       std::max<uint32_t>(1, seeded_route)),
                                    world.current_tick());
-
-                const int64_t offensive_window = std::clamp<int64_t>(actor->logistics_capacity.to_int() / 35 + static_cast<int64_t>(decision.force_commitment * 2.0f), 1, 4);
-                const uint32_t offensive_ticks = 1 + static_cast<uint32_t>(offensive_window);
-                if (offensive_ticks > 1) {
-                    world.schedule_event(std::make_unique<sim::OffensiveEvent>(
-                                           decision.actor_country_id,
-                                           target,
-                                           offensive_ticks,
-                                           route_distance),
-                                       world.current_tick() + 1);
-                }
                 break;
             }
             case Strategy::Defend: {
@@ -726,47 +866,12 @@ void ModelManager::apply_decisions(sim::World& world, const std::vector<Decision
                     return;
                 }
 
-                if (!has_reciprocal_negotiation(decision.actor_country_id, decision.target_country_id)) {
-                    actor->civilian_morale = std::max(sim::Fixed::from_int(0), actor->civilian_morale - sim::Fixed::from_double(0.5));
-                    return;
-                }
-
-                if (decision.terms.type == "alliance") {
-                    bool has_target = false;
-                    for (uint16_t ally_id : actor->allied_country_ids) {
-                        if (ally_id == decision.target_country_id) {
-                            has_target = true;
-                            break;
-                        }
-                    }
-                    if (!has_target) {
-                        actor->allied_country_ids.push_back(decision.target_country_id);
-                    }
-                    sim::Country* target = find_country(world, decision.target_country_id);
-                    if (target != nullptr) {
-                        bool has_actor = false;
-                        for (uint16_t ally_id : target->allied_country_ids) {
-                            if (ally_id == decision.actor_country_id) {
-                                has_actor = true;
-                                break;
-                            }
-                        }
-                        if (!has_actor) {
-                            target->allied_country_ids.push_back(decision.actor_country_id);
-                        }
-                    }
-                } else if (decision.terms.type == "betray") {
-                    actor->allied_country_ids.erase(
-                        std::remove(actor->allied_country_ids.begin(), actor->allied_country_ids.end(), decision.target_country_id),
-                        actor->allied_country_ids.end());
-                    sim::Country* target = find_country(world, decision.target_country_id);
-                    if (target != nullptr) {
-                        target->allied_country_ids.erase(
-                            std::remove(target->allied_country_ids.begin(), target->allied_country_ids.end(), decision.actor_country_id),
-                            target->allied_country_ids.end());
-                    }
-                }
-                world.schedule_event(std::make_unique<sim::NegotiationEvent>(decision.actor_country_id, decision.target_country_id),
+                world.schedule_event(std::make_unique<sim::NegotiationEvent>(
+                                       decision.actor_country_id,
+                                       decision.target_country_id,
+                                       decision.actor_country_id,
+                                       decision.terms.type.empty() ? "ceasefire" : decision.terms.type,
+                                       decision.terms.details),
                                      world.current_tick());
                 break;
             }
@@ -844,7 +949,12 @@ void ModelManager::apply_decisions(sim::World& world, const std::vector<Decision
                 if (decision.target_country_id == 0 || find_country(world, decision.target_country_id) == nullptr) {
                     return;
                 }
-                world.schedule_event(std::make_unique<sim::NegotiationEvent>(decision.actor_country_id, decision.target_country_id),
+                world.schedule_event(std::make_unique<sim::NegotiationEvent>(
+                                       decision.actor_country_id,
+                                       decision.target_country_id,
+                                       decision.actor_country_id,
+                                       "alliance",
+                                       decision.terms.details),
                                      world.current_tick());
                 break;
             }
@@ -861,6 +971,9 @@ void ModelManager::apply_decisions(sim::World& world, const std::vector<Decision
                     target->allied_country_ids.erase(
                         std::remove(target->allied_country_ids.begin(), target->allied_country_ids.end(), decision.actor_country_id),
                         target->allied_country_ids.end());
+                    if (actor->coalition_id != 0 && actor->coalition_id == target->coalition_id) {
+                        actor->coalition_id = 0;
+                    }
                     target->trust_scores[decision.actor_country_id] = std::max(sim::Fixed::from_int(0), target->trust_scores[decision.actor_country_id] - sim::Fixed::from_double(20.0));
                 }
                 actor->trust_scores[decision.target_country_id] = std::max(sim::Fixed::from_int(0), actor->trust_scores[decision.target_country_id] - sim::Fixed::from_double(15.0));
@@ -962,37 +1075,68 @@ void ModelManager::apply_decisions(sim::World& world, const std::vector<Decision
                 actor->draft_level = std::max(sim::Fixed::from_int(0), actor->draft_level - sim::Fixed::from_double(3.0));
                 actor->economic_stability = std::min(sim::Fixed::from_int(100), actor->economic_stability + sim::Fixed::from_double(1.4));
                 actor->war_weariness = std::max(sim::Fixed::from_int(0), actor->war_weariness - sim::Fixed::from_double(2.2));
-                actor->faction_military = std::max(sim::Fixed::from_int(0), actor->faction_military - sim::Fixed::from_double(1.5));
-                actor->faction_civilian = std::min(sim::Fixed::from_int(100), actor->faction_civilian + sim::Fixed::from_double(1.1));
+                actor->faction_hawks = std::max(sim::Fixed::from_int(0), actor->faction_hawks - sim::Fixed::from_double(1.3));
+                actor->faction_economic_liberals = std::min(sim::Fixed::from_int(100), actor->faction_economic_liberals + sim::Fixed::from_double(1.0));
+                actor->faction_populists = std::min(sim::Fixed::from_int(100), actor->faction_populists + sim::Fixed::from_double(0.4));
                 break;
             }
             case Strategy::SuppressDissent: {
-                actor->politics.public_dissent = std::max(sim::Fixed::from_int(0), actor->politics.public_dissent - sim::Fixed::from_double(4.5));
-                actor->politics.government_stability = std::max(sim::Fixed::from_int(0), actor->politics.government_stability - sim::Fixed::from_double(1.3));
-                actor->civilian_morale = std::max(sim::Fixed::from_int(0), actor->civilian_morale - sim::Fixed::from_double(1.7));
-                actor->coup_risk = std::min(sim::Fixed::from_int(100), actor->coup_risk + sim::Fixed::from_double(1.0));
-                actor->faction_military = std::min(sim::Fixed::from_int(100), actor->faction_military + sim::Fixed::from_double(0.8));
+                const int stage = static_cast<int>(actor->unrest_stage);
+                const double suppression_strength = 3.2 + stage * 1.0;
+                const double legitimacy_cost = 0.9 + stage * 0.7;
+                actor->politics.public_dissent = std::max(sim::Fixed::from_int(0), actor->politics.public_dissent - sim::Fixed::from_double(suppression_strength));
+                actor->politics.government_stability = std::max(sim::Fixed::from_int(0), actor->politics.government_stability - sim::Fixed::from_double(legitimacy_cost));
+                actor->civilian_morale = std::max(sim::Fixed::from_int(0), actor->civilian_morale - sim::Fixed::from_double(1.4 + stage * 0.5));
+                actor->coup_risk = std::min(sim::Fixed::from_int(100), actor->coup_risk + sim::Fixed::from_double(0.8 + stage * 0.3));
+                actor->reputation = std::max(sim::Fixed::from_int(0), actor->reputation - sim::Fixed::from_double(1.1 + stage * 1.0));
+                actor->faction_hawks = std::min(sim::Fixed::from_int(100), actor->faction_hawks + sim::Fixed::from_double(0.9));
+                actor->faction_populists = std::max(sim::Fixed::from_int(0), actor->faction_populists - sim::Fixed::from_double(0.6));
                 break;
             }
             case Strategy::HoldElections: {
-                actor->election_cycle = 8;
+                const int stage = static_cast<int>(actor->unrest_stage);
+                actor->election_cycle = 1;
                 actor->politics.government_stability = std::min(sim::Fixed::from_int(100), actor->politics.government_stability + sim::Fixed::from_double(3.5));
                 actor->civilian_morale = std::min(sim::Fixed::from_int(100), actor->civilian_morale + sim::Fixed::from_double(2.0));
-                actor->politics.public_dissent = std::max(sim::Fixed::from_int(0), actor->politics.public_dissent - sim::Fixed::from_double(2.2));
-                actor->faction_civilian = std::min(sim::Fixed::from_int(100), actor->faction_civilian + sim::Fixed::from_double(2.0));
+                actor->politics.public_dissent = std::max(sim::Fixed::from_int(0), actor->politics.public_dissent - sim::Fixed::from_double(2.4 + stage * 0.4));
+                // Concessions calm unrest but reduce short-term output.
+                actor->economic_stability = std::max(sim::Fixed::from_int(0), actor->economic_stability - sim::Fixed::from_double(1.1 + stage * 0.4));
+                actor->industrial_output = std::max(sim::Fixed::from_int(0), actor->industrial_output - sim::Fixed::from_double(1.3 + stage * 0.5));
+                actor->faction_populists = std::min(sim::Fixed::from_int(100), actor->faction_populists + sim::Fixed::from_double(2.1));
+                actor->faction_hawks = std::max(sim::Fixed::from_int(0), actor->faction_hawks - sim::Fixed::from_double(0.9));
+                const double r1 = deterministic_roll(actor->id, actor->id, Strategy::HoldElections, 0xE11ULL);
+                const double r2 = deterministic_roll(actor->id, actor->id, Strategy::HoldElections, 0xE22ULL);
+                const double r3 = deterministic_roll(actor->id, actor->id, Strategy::HoldElections, 0xE33ULL);
+                const double r4 = deterministic_roll(actor->id, actor->id, Strategy::HoldElections, 0xE44ULL);
+                actor->leader_traits.aggressive = sim::Fixed::from_double(30.0 + r1 * 50.0);
+                actor->leader_traits.diplomatic = sim::Fixed::from_double(38.0 + r2 * 55.0);
+                actor->leader_traits.corrupt = sim::Fixed::from_double(15.0 + r3 * 55.0);
+                actor->leader_traits.competent = sim::Fixed::from_double(35.0 + r4 * 55.0);
+                actor->leader_tenure_ticks = 0;
+                actor->regime_type = sim::RegimeType::Democratic;
                 break;
             }
             case Strategy::CoupAttempt: {
-                const double chance = (actor->coup_risk.to_double() + actor->faction_military.to_double() - actor->faction_civilian.to_double()) / 140.0;
+                const double chance = (actor->coup_risk.to_double() + actor->faction_hawks.to_double() - actor->faction_populists.to_double()) / 140.0;
                 const double roll = static_cast<double>((world.current_tick() + actor->id * 19U) % 100U) / 100.0;
                 if (roll < std::clamp(chance, 0.05, 0.85)) {
                     actor->diplomatic_stance = sim::DiplomaticStance::Aggressive;
                     actor->politics.government_stability = std::min(sim::Fixed::from_int(100), actor->politics.government_stability + sim::Fixed::from_double(6.0));
-                    actor->faction_military = std::min(sim::Fixed::from_int(100), actor->faction_military + sim::Fixed::from_double(8.0));
-                    actor->faction_civilian = std::max(sim::Fixed::from_int(0), actor->faction_civilian - sim::Fixed::from_double(6.0));
+                    actor->faction_hawks = std::min(sim::Fixed::from_int(100), actor->faction_hawks + sim::Fixed::from_double(8.0));
+                    actor->faction_populists = std::max(sim::Fixed::from_int(0), actor->faction_populists - sim::Fixed::from_double(6.0));
                     actor->coup_risk = std::max(sim::Fixed::from_int(0), actor->coup_risk - sim::Fixed::from_double(12.0));
                     actor->trade_partners.clear();
                     actor->embargoed_country_ids.clear();
+                    actor->regime_type = sim::RegimeType::Authoritarian;
+                    const double r1 = deterministic_roll(actor->id, actor->id, Strategy::CoupAttempt, 0xC11ULL);
+                    const double r2 = deterministic_roll(actor->id, actor->id, Strategy::CoupAttempt, 0xC22ULL);
+                    const double r3 = deterministic_roll(actor->id, actor->id, Strategy::CoupAttempt, 0xC33ULL);
+                    const double r4 = deterministic_roll(actor->id, actor->id, Strategy::CoupAttempt, 0xC44ULL);
+                    actor->leader_traits.aggressive = sim::Fixed::from_double(55.0 + r1 * 40.0);
+                    actor->leader_traits.diplomatic = sim::Fixed::from_double(10.0 + r2 * 45.0);
+                    actor->leader_traits.corrupt = sim::Fixed::from_double(35.0 + r3 * 55.0);
+                    actor->leader_traits.competent = sim::Fixed::from_double(20.0 + r4 * 60.0);
+                    actor->leader_tenure_ticks = 0;
                 } else {
                     actor->politics.government_stability = std::max(sim::Fixed::from_int(0), actor->politics.government_stability - sim::Fixed::from_double(8.0));
                     actor->civilian_morale = std::max(sim::Fixed::from_int(0), actor->civilian_morale - sim::Fixed::from_double(6.0));
@@ -1004,6 +1148,14 @@ void ModelManager::apply_decisions(sim::World& world, const std::vector<Decision
                 const uint16_t target_id = decision.target_country_id;
                 sim::Country* target = find_country(world, target_id);
                 if (target == nullptr || !has_reciprocal_defense(actor->id, target_id)) {
+                    return;
+                }
+                const auto actor_trust_it = actor->trust_scores.find(target_id);
+                const auto target_trust_it = target->trust_scores.find(actor->id);
+                const double actor_trust = actor_trust_it == actor->trust_scores.end() ? 50.0 : actor_trust_it->second.to_double();
+                const double target_trust = target_trust_it == target->trust_scores.end() ? 50.0 : target_trust_it->second.to_double();
+                const double bilateral_trust = std::min(actor_trust, target_trust);
+                if (bilateral_trust <= 70.0) {
                     return;
                 }
                 pallas::util::add_unique_id(&actor->has_defense_pact_with, target_id);
@@ -1019,6 +1171,14 @@ void ModelManager::apply_decisions(sim::World& world, const std::vector<Decision
                 const uint16_t target_id = decision.target_country_id;
                 sim::Country* target = find_country(world, target_id);
                 if (target == nullptr || !has_reciprocal_non_aggression(actor->id, target_id)) {
+                    return;
+                }
+                const auto actor_trust_it = actor->trust_scores.find(target_id);
+                const auto target_trust_it = target->trust_scores.find(actor->id);
+                const double actor_trust = actor_trust_it == actor->trust_scores.end() ? 50.0 : actor_trust_it->second.to_double();
+                const double target_trust = target_trust_it == target->trust_scores.end() ? 50.0 : target_trust_it->second.to_double();
+                const double bilateral_trust = std::min(actor_trust, target_trust);
+                if (bilateral_trust < 20.0) {
                     return;
                 }
                 pallas::util::add_unique_id(&actor->has_non_aggression_with, target_id);
@@ -1047,6 +1207,9 @@ void ModelManager::apply_decisions(sim::World& world, const std::vector<Decision
                     target->defense_pact_expiry_ticks.erase(actor->id);
                     target->non_aggression_expiry_ticks.erase(actor->id);
                     target->trade_treaty_expiry_ticks.erase(actor->id);
+                    if (actor->coalition_id != 0 && actor->coalition_id == target->coalition_id) {
+                        actor->coalition_id = 0;
+                    }
                     target->trust_scores[actor->id] = std::max(sim::Fixed::from_int(0), target->trust_scores[actor->id] - sim::Fixed::from_double(12.0));
                 }
                 break;
@@ -1130,6 +1293,10 @@ void ModelManager::apply_decisions(sim::World& world, const std::vector<Decision
                 break;
             }
         }
+
+        actor->faction_military = actor->faction_hawks;
+        actor->faction_industrial = actor->faction_economic_liberals;
+        actor->faction_civilian = actor->faction_populists;
         });
     }
 }
@@ -1405,7 +1572,7 @@ bool ModelManager::has_loaded_model_for_country(uint16_t country_id) const {
     return false;
 }
 
-WorldSnapshot ModelManager::build_world_snapshot(const sim::World& world) const {
+WorldSnapshot ModelManager::build_world_snapshot(const sim::World& world, uint16_t observer_country_id) const {
     WorldSnapshot snapshot;
     snapshot.tick = world.current_tick();
 
@@ -1427,11 +1594,16 @@ WorldSnapshot ModelManager::build_world_snapshot(const sim::World& world) const 
         country_snapshot.logistics_milli = country.logistics_capacity.raw();
         country_snapshot.intelligence_milli = country.intelligence_level.raw();
         country_snapshot.industry_milli = country.industrial_output.raw();
+        country_snapshot.industrial_capital_milli = country.industrial_capital.raw();
+        country_snapshot.labor_participation_milli = country.labor_participation.raw();
+        country_snapshot.technology_multiplier_milli = country.technology_multiplier.raw();
+        country_snapshot.gdp_output_milli = country.gdp_output.raw();
         country_snapshot.technology_milli = country.technology_level.raw();
         country_snapshot.resource_reserve_milli = country.resource_reserve.raw();
         country_snapshot.supply_level_milli = country.supply_level.raw();
         country_snapshot.supply_capacity_milli = country.supply_capacity.raw();
         country_snapshot.trade_balance_milli = country.trade_balance.raw();
+        country_snapshot.import_price_index_milli = country.import_price_index.raw();
         country_snapshot.trade_partner_ids = country.trade_partners;
         country_snapshot.defense_pact_ids = country.has_defense_pact_with;
         country_snapshot.non_aggression_pact_ids = country.has_non_aggression_with;
@@ -1444,6 +1616,10 @@ WorldSnapshot ModelManager::build_world_snapshot(const sim::World& world) const 
         country_snapshot.faction_military_milli = country.faction_military.raw();
         country_snapshot.faction_industrial_milli = country.faction_industrial.raw();
         country_snapshot.faction_civilian_milli = country.faction_civilian.raw();
+        country_snapshot.war_economy_intensity_milli = country.war_economy_intensity.raw();
+        country_snapshot.industrial_decay_milli = country.industrial_decay.raw();
+        country_snapshot.debt_to_gdp_milli = country.debt_to_gdp.raw();
+        country_snapshot.war_bond_stock_milli = country.war_bond_stock.raw();
         country_snapshot.coup_risk_milli = country.coup_risk.raw();
         country_snapshot.election_cycle = country.election_cycle;
         country_snapshot.draft_level_milli = country.draft_level.raw();
@@ -1480,7 +1656,13 @@ WorldSnapshot ModelManager::build_world_snapshot(const sim::World& world) const 
         for (const auto& kv : country.believed_army_size) {
             country_snapshot.believed_army_size_milli[kv.first] = kv.second.raw();
         }
-        country_snapshot.recent_betrayals = static_cast<int32_t>(country.betrayal_tick_log.size());
+        double betrayal_decay = 0.0;
+        for (uint64_t tick : country.betrayal_tick_log) {
+            const uint64_t age = world.current_tick() > tick ? (world.current_tick() - tick) : 0;
+            betrayal_decay += std::exp2(-static_cast<double>(age) / 30.0);
+        }
+        const double betrayal_index = betrayal_decay + static_cast<double>(country.betrayal_tick_log.size()) * 0.25;
+        country_snapshot.recent_betrayals = static_cast<int32_t>(std::lround(std::clamp(betrayal_index, 0.0, 12.0)));
         country_snapshot.strategic_depth_milli = country.strategic_depth.raw();
         for (const auto& kv : country.opponent_model_confidence) {
             country_snapshot.opponent_model_confidence_milli[kv.first] = kv.second.raw();
@@ -1493,6 +1675,77 @@ WorldSnapshot ModelManager::build_world_snapshot(const sim::World& world) const 
             country_snapshot.intel_on_enemy_milli[kv.first] = kv.second.raw();
         }
         snapshot.countries.push_back(std::move(country_snapshot));
+    }
+
+    if (observer_country_id == 0) {
+        return snapshot;
+    }
+
+    const sim::Country* observer_country = find_country(world, observer_country_id);
+    if (observer_country == nullptr) {
+        return snapshot;
+    }
+
+    for (CountrySnapshot& seen : snapshot.countries) {
+        if (seen.id == observer_country_id) {
+            continue;
+        }
+
+        const auto intel_it = observer_country->intel_on_enemy.find(seen.id);
+        const double direct_intel = intel_it == observer_country->intel_on_enemy.end()
+            ? observer_country->intelligence_level.to_double() * 0.58
+            : intel_it->second.to_double();
+        const auto confidence_it = observer_country->opponent_model_confidence.find(seen.id);
+        const double model_conf = confidence_it == observer_country->opponent_model_confidence.end()
+            ? observer_country->intelligence_level.to_double() * 0.42
+            : confidence_it->second.to_double();
+        const double cyber_bonus = observer_country->technology.cyber_warfare.to_double() * 0.18;
+        const double quality = std::clamp((direct_intel * 0.56 + model_conf * 0.24 + cyber_bonus * 0.20) / 100.0, 0.0, 1.0);
+        const double max_error = 0.30 * (1.0 - quality);
+
+        auto noisy_percent = [&](int64_t milli_value, uint64_t salt) {
+            const double noise = deterministic_noise_signed(world.current_tick() + observer_country_id * 977ULL + seen.id * 313ULL, salt);
+            const double multiplier = 1.0 + noise * max_error;
+            return static_cast<int64_t>(std::llround(static_cast<double>(milli_value) * multiplier));
+        };
+        auto noisy_signed = [&](int64_t milli_value, uint64_t salt) {
+            const double noise = deterministic_noise_signed(world.current_tick() + observer_country_id * 1009ULL + seen.id * 281ULL, salt);
+            const double abs_scale = std::max(2000.0, std::abs(static_cast<double>(milli_value)));
+            return static_cast<int64_t>(std::llround(static_cast<double>(milli_value) + noise * max_error * abs_scale));
+        };
+
+        seen.units_infantry_milli = std::max<int64_t>(0, noisy_percent(seen.units_infantry_milli, 0x11ULL));
+        seen.units_armor_milli = std::max<int64_t>(0, noisy_percent(seen.units_armor_milli, 0x12ULL));
+        seen.units_artillery_milli = std::max<int64_t>(0, noisy_percent(seen.units_artillery_milli, 0x13ULL));
+        seen.units_air_fighter_milli = std::max<int64_t>(0, noisy_percent(seen.units_air_fighter_milli, 0x14ULL));
+        seen.units_air_bomber_milli = std::max<int64_t>(0, noisy_percent(seen.units_air_bomber_milli, 0x15ULL));
+        seen.units_naval_surface_milli = std::max<int64_t>(0, noisy_percent(seen.units_naval_surface_milli, 0x16ULL));
+        seen.units_naval_submarine_milli = std::max<int64_t>(0, noisy_percent(seen.units_naval_submarine_milli, 0x17ULL));
+        seen.economic_stability_milli = std::clamp(noisy_percent(seen.economic_stability_milli, 0x18ULL), int64_t(0), int64_t(100000));
+        seen.civilian_morale_milli = std::clamp(noisy_percent(seen.civilian_morale_milli, 0x19ULL), int64_t(0), int64_t(100000));
+        seen.logistics_milli = std::clamp(noisy_percent(seen.logistics_milli, 0x1AULL), int64_t(0), int64_t(100000));
+        seen.intelligence_milli = std::clamp(noisy_percent(seen.intelligence_milli, 0x1BULL), int64_t(0), int64_t(100000));
+        seen.industry_milli = std::clamp(noisy_percent(seen.industry_milli, 0x1CULL), int64_t(0), int64_t(100000));
+        seen.technology_milli = std::clamp(noisy_percent(seen.technology_milli, 0x1DULL), int64_t(0), int64_t(100000));
+        seen.resource_reserve_milli = std::clamp(noisy_percent(seen.resource_reserve_milli, 0x1EULL), int64_t(0), int64_t(100000));
+        seen.supply_level_milli = std::clamp(noisy_percent(seen.supply_level_milli, 0x1FULL), int64_t(0), int64_t(100000));
+        seen.supply_capacity_milli = std::clamp(noisy_percent(seen.supply_capacity_milli, 0x20ULL), int64_t(0), int64_t(100000));
+        seen.trade_balance_milli = std::clamp(noisy_signed(seen.trade_balance_milli, 0x21ULL), int64_t(-100000), int64_t(100000));
+
+        const int64_t perceived_strength =
+            seen.units_infantry_milli + (seen.units_armor_milli * 3) / 2 + (seen.units_artillery_milli * 5) / 4 +
+            (seen.units_air_fighter_milli * 7) / 5 + (seen.units_air_bomber_milli * 8) / 5 +
+            (seen.units_naval_surface_milli * 7) / 5 + (seen.units_naval_submarine_milli * 3) / 2;
+        CountrySnapshot* observer_snapshot = nullptr;
+        for (CountrySnapshot& c : snapshot.countries) {
+            if (c.id == observer_country_id) {
+                observer_snapshot = &c;
+                break;
+            }
+        }
+        if (observer_snapshot != nullptr) {
+            observer_snapshot->believed_army_size_milli[seen.id] = std::max<int64_t>(1000, perceived_strength);
+        }
     }
 
     return snapshot;
@@ -2773,6 +3026,24 @@ std::string BattleEngine::current_state_json() const {
             oss << ',';
         }
         oss << cells[i];
+    }
+    oss << "],";
+    oss << "\"tags\":[";
+    const auto& tags = map.flattened_cell_tags();
+    for (size_t i = 0; i < tags.size(); ++i) {
+        if (i > 0) {
+            oss << ',';
+        }
+        oss << static_cast<uint32_t>(tags[i]);
+    }
+    oss << "],";
+    oss << "\"sea_zones\":[";
+    const auto& sea_zones = map.flattened_sea_zone_ids();
+    for (size_t i = 0; i < sea_zones.size(); ++i) {
+        if (i > 0) {
+            oss << ',';
+        }
+        oss << sea_zones[i];
     }
     oss << "]}";
     oss << "}";

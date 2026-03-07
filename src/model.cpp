@@ -1341,8 +1341,12 @@ ModelDecision Model::decide(const WorldSnapshot& world_snapshot, uint16_t contro
             ", got " + std::to_string(in_dim) + "x" + std::to_string(out_dim));
     }
 
-    Tensor nn_input({1, in_dim}, 0.0f);
-    auto set_feature = [&](size_t idx, float value) { nn_input.data[idx] = value; };
+    std::array<float, battle_common::kBattleBaseInputDim> base_frame{};
+    auto set_feature = [&](size_t idx, float value) {
+        if (idx < base_frame.size()) {
+            base_frame[idx] = value;
+        }
+    };
 
     const float self_strength_norm = static_cast<float>(std::min<int64_t>(self_strength, 1'000'000)) / 1'000'000.0f;
     const float neighbor_strength_norm = static_cast<float>(std::min<int64_t>(strongest_neighbor_strength, 1'000'000)) / 1'000'000.0f;
@@ -1530,20 +1534,168 @@ ModelDecision Model::decide(const WorldSnapshot& world_snapshot, uint16_t contro
     set_feature(88, recent_betrayals_norm);
     set_feature(89, strategic_depth_norm);
 
+    auto& history = temporal_history_[controlled_country_id];
+    history.push_back(base_frame);
+    while (history.size() > battle_common::kBattleTemporalWindow) {
+        history.pop_front();
+    }
+
+    Tensor nn_input({1, in_dim}, 0.0f);
+    for (size_t t = 0; t < battle_common::kBattleTemporalWindow; ++t) {
+        const size_t offset = t * battle_common::kBattleBaseInputDim;
+        if (offset + battle_common::kBattleBaseInputDim > nn_input.data.size()) {
+            break;
+        }
+        const bool has_frame = t < history.size();
+        if (!has_frame) {
+            continue;
+        }
+        const size_t source_idx = history.size() - 1U - t;
+        const auto& frame = history[source_idx];
+        for (size_t f = 0; f < battle_common::kBattleBaseInputDim; ++f) {
+            nn_input.data[offset + f] = frame[f];
+        }
+    }
+
     Tensor logits = forward(nn_input);
-    const size_t action_count = std::min<size_t>(battle_common::kBattleOutputDim, logits.data.size());
+    const size_t action_count = std::min<size_t>(battle_common::kBattlePolicyActionDim, logits.data.size());
     if (action_count == 0) {
         decision.strategy = Strategy::Defend;
         decision.target_country_id = strongest_neighbor_id;
         return decision;
     }
 
+    auto head_argmax = [&](size_t offset, size_t size) -> size_t {
+        if (offset >= logits.data.size() || size == 0) {
+            return 0;
+        }
+        const size_t capped = std::min(size, logits.data.size() - offset);
+        size_t best = 0;
+        float best_score = logits.data[offset];
+        for (size_t i = 1; i < capped; ++i) {
+            if (logits.data[offset + i] > best_score) {
+                best_score = logits.data[offset + i];
+                best = i;
+            }
+        }
+        return best;
+    };
+
+    std::array<float, battle_common::kBattleStrategicGoalDim> strategic_logits{};
+    for (size_t i = 0; i < strategic_logits.size(); ++i) {
+        const size_t idx = battle_common::kBattleHeadStrategicOffset + i;
+        strategic_logits[i] = idx < logits.data.size() ? logits.data[idx] : -1e9f;
+    }
+
+    float max_strategic = strategic_logits[0];
+    for (size_t i = 1; i < strategic_logits.size(); ++i) {
+        max_strategic = std::max(max_strategic, strategic_logits[i]);
+    }
+    std::array<float, battle_common::kBattleStrategicGoalDim> strategic_prob{};
+    float strategic_sum = 0.0f;
+    for (size_t i = 0; i < strategic_prob.size(); ++i) {
+        strategic_prob[i] = std::exp(strategic_logits[i] - max_strategic);
+        strategic_sum += strategic_prob[i];
+    }
+    if (strategic_sum > 0.0f) {
+        for (float& p : strategic_prob) {
+            p /= strategic_sum;
+        }
+    }
+
+    enum class StrategicGoal : uint8_t { Attack = 0, Defend = 1, Trade = 2, Develop = 3 };
+
+    auto action_belongs_to_goal = [](Strategy strategy, StrategicGoal goal) {
+        switch (goal) {
+            case StrategicGoal::Attack:
+                return strategy == Strategy::Attack || strategy == Strategy::DeployUnits ||
+                       strategy == Strategy::CyberAttack || strategy == Strategy::CyberOperation ||
+                       strategy == Strategy::TacticalNuke || strategy == Strategy::StrategicNuke ||
+                       strategy == Strategy::Betray || strategy == Strategy::BreakTreaty;
+            case StrategicGoal::Defend:
+                return strategy == Strategy::Defend || strategy == Strategy::RequestIntel ||
+                       strategy == Strategy::ProposeDefensePact || strategy == Strategy::ProposeNonAggression ||
+                       strategy == Strategy::SuppressDissent || strategy == Strategy::TransferWeapons;
+            case StrategicGoal::Trade:
+                return strategy == Strategy::SignTradeAgreement || strategy == Strategy::CancelTradeAgreement ||
+                       strategy == Strategy::ImposeEmbargo || strategy == Strategy::InvestInResourceExtraction ||
+                       strategy == Strategy::ReduceMilitaryUpkeep;
+            case StrategicGoal::Develop:
+                return strategy == Strategy::FocusEconomy || strategy == Strategy::DevelopTechnology ||
+                       strategy == Strategy::FormAlliance || strategy == Strategy::Negotiate ||
+                       strategy == Strategy::HoldElections || strategy == Strategy::CoupAttempt;
+        }
+        return false;
+    };
+
+    const size_t predicted_opponent_idx = head_argmax(battle_common::kBattleHeadOpponentOffset,
+                                                      battle_common::kBattleOpponentActionDim);
+    const Strategy predicted_opponent_action = static_cast<Strategy>(predicted_opponent_idx);
+    const bool opponent_escalating =
+        predicted_opponent_action == Strategy::Attack ||
+        predicted_opponent_action == Strategy::DeployUnits ||
+        predicted_opponent_action == Strategy::CyberAttack ||
+        predicted_opponent_action == Strategy::TacticalNuke ||
+        predicted_opponent_action == Strategy::StrategicNuke;
+
+    const float value_logit = battle_common::kBattleHeadValueOffset < logits.data.size()
+        ? logits.data[battle_common::kBattleHeadValueOffset]
+        : 0.0f;
+    const float value_estimate = std::tanh(value_logit);
+
+    auto mcts_rollout = [&](StrategicGoal root_goal) {
+        const size_t depth = 3;
+        const float opp_penalty = opponent_escalating ? 0.10f : -0.04f;
+        const float crisis_term = crisis_pressure * 0.12f;
+
+        float best = -1e9f;
+        for (size_t a = 0; a < strategic_prob.size(); ++a) {
+            float node = 0.52f * strategic_prob[static_cast<size_t>(root_goal)] +
+                         0.48f * strategic_prob[a];
+            float future = node;
+            for (size_t d = 0; d < depth; ++d) {
+                const float blend = 0.60f - 0.10f * static_cast<float>(d);
+                future = blend * future + (1.0f - blend) * strategic_prob[a];
+            }
+            const float score = future + value_estimate * 0.35f - crisis_term - opp_penalty;
+            best = std::max(best, score);
+        }
+        return best;
+    };
+
+    StrategicGoal chosen_goal = StrategicGoal::Defend;
+    float best_goal_score = -1e9f;
+    for (size_t i = 0; i < strategic_prob.size(); ++i) {
+        const StrategicGoal g = static_cast<StrategicGoal>(i);
+        const float score = mcts_rollout(g);
+        if (score > best_goal_score) {
+            best_goal_score = score;
+            chosen_goal = g;
+        }
+    }
+
     size_t best_idx = 0;
-    float best_score = logits.data[0];
-    for (size_t i = 1; i < action_count; ++i) {
-        if (logits.data[i] > best_score) {
-            best_score = logits.data[i];
+    float best_score = -1e9f;
+    for (size_t i = 0; i < action_count; ++i) {
+        const Strategy candidate = static_cast<Strategy>(i);
+        if (!action_belongs_to_goal(candidate, chosen_goal)) {
+            continue;
+        }
+        const float score = logits.data[i] + strategic_prob[static_cast<size_t>(chosen_goal)] * 0.30f;
+        if (score > best_score) {
+            best_score = score;
             best_idx = i;
+        }
+    }
+
+    if (best_score < -1e8f) {
+        best_idx = 0;
+        best_score = logits.data[0];
+        for (size_t i = 1; i < action_count; ++i) {
+            if (logits.data[i] > best_score) {
+                best_score = logits.data[i];
+                best_idx = i;
+            }
         }
     }
 
@@ -1551,22 +1703,39 @@ ModelDecision Model::decide(const WorldSnapshot& world_snapshot, uint16_t contro
     const uint16_t opportunistic_target_id = weakest_believed_neighbor_id != 0 ? weakest_believed_neighbor_id : weakest_neighbor_id;
 
     decision.strategy = static_cast<Strategy>(best_idx);
-    decision.target_country_id = primary_threat_id;
-    const float offense_alloc = std::clamp(0.22f + attack_opportunity * 0.38f + faction_military_norm * 0.12f - crisis_pressure * 0.14f, 0.05f, 0.90f);
-    const float defense_alloc = std::clamp(0.26f + crisis_pressure * 0.28f + threat_ratio * 0.14f + defense_pact_ratio * 0.08f, 0.05f, 0.90f);
-    const float logistics_alloc = std::clamp(0.18f + (1.0f - supply_level_norm) * 0.30f + reserve_stress * 0.16f + intel_opportunity * 0.10f, 0.05f, 0.90f);
-    decision.allocation = {offense_alloc, defense_alloc, logistics_alloc};
-    const float alloc_sum = decision.allocation[0] + decision.allocation[1] + decision.allocation[2];
-    if (alloc_sum > 1e-6f) {
-        decision.allocation[0] /= alloc_sum;
-        decision.allocation[1] /= alloc_sum;
-        decision.allocation[2] /= alloc_sum;
+
+    const size_t target_bucket = head_argmax(battle_common::kBattleHeadTargetBucketOffset,
+                                             battle_common::kBattleTacticalTargetBucketDim);
+    if (target_bucket == 0) {
+        decision.target_country_id = primary_threat_id;
+    } else if (target_bucket == 1) {
+        decision.target_country_id = opportunistic_target_id;
+    } else {
+        decision.target_country_id = best_treaty_target_id != 0 ? best_treaty_target_id : best_trade_target_id;
     }
 
-    decision.force_commitment = std::clamp(0.16f + attack_opportunity * 0.42f + strategic_depth_norm * 0.12f +
-                                           opponent_confidence_avg * 0.10f - crisis_pressure * 0.15f,
-                                           0.10f,
-                                           0.95f);
+    const size_t commitment_bucket = head_argmax(battle_common::kBattleHeadCommitmentOffset,
+                                                 battle_common::kBattleCommitmentBucketDim);
+    if (commitment_bucket == 0) {
+        decision.force_commitment = 0.28f;
+    } else if (commitment_bucket == 1) {
+        decision.force_commitment = 0.52f;
+    } else {
+        decision.force_commitment = 0.78f;
+    }
+    if (opponent_escalating) {
+        decision.force_commitment = std::min(0.92f, decision.force_commitment + 0.08f);
+    }
+
+    const size_t allocation_bucket = head_argmax(battle_common::kBattleHeadAllocationOffset,
+                                                 battle_common::kBattleAllocationBucketDim);
+    if (allocation_bucket == 0) {
+        decision.allocation = {0.58f, 0.24f, 0.18f};
+    } else if (allocation_bucket == 1) {
+        decision.allocation = {0.24f, 0.58f, 0.18f};
+    } else {
+        decision.allocation = {0.22f, 0.24f, 0.54f};
+    }
 
     auto populate_action = [&](Strategy strategy, uint16_t* target_country_id, NegotiationTerms* terms) {
         if (target_country_id == nullptr || terms == nullptr) {

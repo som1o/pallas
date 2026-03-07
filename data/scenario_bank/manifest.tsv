@@ -1,0 +1,25 @@
+scenario_id\tpattern\tdescription
+cold_war_standoff_01\tcold-war\tbinary bloc deterrence with sustained escalation
+cold_war_standoff_02\tcold-war\tasymmetric bloc trust and escalation gradients
+cold_war_standoff_03\tcold-war\textended standoff on larger map
+resource_scarcity_01\tresource-scarcity\tglobal reserve drop with market competition
+resource_scarcity_02\tresource-scarcity\tdeeper reserve shock and prolonged contest
+resource_scarcity_03\tresource-scarcity\textreme scarcity stress test
+multi_front_war_01\tmulti-front\ttwo-coalition high-pressure confrontation
+multi_front_war_02\tmulti-front\tmixed diplomatic stances under war load
+multi_front_war_03\tmulti-front\tlonger conflict with stronger escalation
+island_defense_01\tisland-defense\tmaritime powers defend sea-lane buffers
+island_defense_02\tisland-defense\tincreased continental pressure on maritime teams
+island_defense_03\tisland-defense\tlarger theater with prolonged naval contest
+alliance_fracture_01\talliance-fracture\tstable pacts baseline
+alliance_fracture_02\talliance-fracture\trealigned blocs and trust breakdown
+alliance_fracture_03\talliance-fracture\thigher escalation after alliance split
+coup_pressure_01\tinternal-crisis\tmoderate legitimacy stress
+coup_pressure_02\tinternal-crisis\tdeeper governance fragility
+coup_pressure_03\tinternal-crisis\tsevere coup-risk stress
+embargo_chokepoint_01\tembargo\ttrade coercion via chokepoints
+embargo_chokepoint_02\tembargo\tharsher embargo and retaliation pressure
+embargo_chokepoint_03\tembargo\tprolonged embargo brinkmanship
+deterrence_brink_01\tnuclear-deterrence\tbalanced high-readiness deterrence
+deterrence_brink_02\tnuclear-deterrence\tasymmetric deterrence stress
+deterrence_brink_03\tnuclear-deterrence\tmaximum escalation brink scenario

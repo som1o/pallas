@@ -43,6 +43,23 @@ std::vector<uint16_t> parse_u16_list(const std::string& raw, char sep) {
     return out;
 }
 
+std::vector<uint8_t> parse_u8_list(const std::string& raw, char sep) {
+    std::vector<uint8_t> out;
+    std::stringstream ss(raw);
+    std::string part;
+    while (std::getline(ss, part, sep)) {
+        const std::string token = trim(part);
+        if (token.empty()) {
+            continue;
+        }
+        try {
+            out.push_back(static_cast<uint8_t>(std::stoul(token)));
+        } catch (...) {
+        }
+    }
+    return out;
+}
+
 void apply_legacy_force_mapping(ScenarioCountryConfig* c) {
     if (c == nullptr) {
         return;
@@ -134,6 +151,14 @@ bool load_scenario_text(const std::string& content, ScenarioConfig* out) {
             cfg.map_cells = parse_u16_list(trim(s.substr(10)), ',');
             continue;
         }
+        if (s.rfind("map_cell_tags=", 0) == 0) {
+            cfg.map_cell_tags = parse_u8_list(trim(s.substr(14)), ',');
+            continue;
+        }
+        if (s.rfind("map_sea_zones=", 0) == 0) {
+            cfg.map_sea_zone_ids = parse_u16_list(trim(s.substr(14)), ',');
+            continue;
+        }
         if (s.rfind("model=", 0) == 0) {
             std::stringstream ss(s.substr(6));
             std::string name;
@@ -206,7 +231,21 @@ bool load_scenario_text(const std::string& content, ScenarioConfig* out) {
         }
     }
 
-    if (!cfg.map_cells.empty() && cfg.map_cells.size() != static_cast<size_t>(cfg.map_width) * cfg.map_height) {
+    const size_t cell_count = static_cast<size_t>(cfg.map_width) * cfg.map_height;
+    if (!cfg.map_cell_tags.empty() && cfg.map_cell_tags.size() != cell_count) {
+        cfg.map_cell_tags.clear();
+    }
+    if (!cfg.map_sea_zone_ids.empty() && cfg.map_sea_zone_ids.size() != cell_count) {
+        cfg.map_sea_zone_ids.clear();
+    }
+
+    if (!cfg.map_cells.empty() && cfg.map_cells.size() != cell_count) {
+        return false;
+    }
+    if (!cfg.map_cell_tags.empty() && cfg.map_cell_tags.size() != cell_count) {
+        return false;
+    }
+    if (!cfg.map_sea_zone_ids.empty() && cfg.map_sea_zone_ids.size() != cell_count) {
         return false;
     }
 
@@ -245,6 +284,22 @@ bool load_scenario_json(const std::string& content, ScenarioConfig* out) {
             for (const auto& cell : map["cells"]) {
                 if (cell.is_number_unsigned()) {
                     cfg.map_cells.push_back(cell.get<uint16_t>());
+                }
+            }
+        }
+        if (map.contains("tags") && map["tags"].is_array()) {
+            cfg.map_cell_tags.clear();
+            for (const auto& tag : map["tags"]) {
+                if (tag.is_number_unsigned()) {
+                    cfg.map_cell_tags.push_back(static_cast<uint8_t>(tag.get<uint16_t>()));
+                }
+            }
+        }
+        if (map.contains("sea_zones") && map["sea_zones"].is_array()) {
+            cfg.map_sea_zone_ids.clear();
+            for (const auto& zone : map["sea_zones"]) {
+                if (zone.is_number_unsigned()) {
+                    cfg.map_sea_zone_ids.push_back(zone.get<uint16_t>());
                 }
             }
         }
@@ -348,7 +403,21 @@ bool load_scenario_json(const std::string& content, ScenarioConfig* out) {
         }
     }
 
-    if (!cfg.map_cells.empty() && cfg.map_cells.size() != static_cast<size_t>(cfg.map_width) * cfg.map_height) {
+    const size_t cell_count = static_cast<size_t>(cfg.map_width) * cfg.map_height;
+    if (!cfg.map_cell_tags.empty() && cfg.map_cell_tags.size() != cell_count) {
+        cfg.map_cell_tags.clear();
+    }
+    if (!cfg.map_sea_zone_ids.empty() && cfg.map_sea_zone_ids.size() != cell_count) {
+        cfg.map_sea_zone_ids.clear();
+    }
+
+    if (!cfg.map_cells.empty() && cfg.map_cells.size() != cell_count) {
+        return false;
+    }
+    if (!cfg.map_cell_tags.empty() && cfg.map_cell_tags.size() != cell_count) {
+        return false;
+    }
+    if (!cfg.map_sea_zone_ids.empty() && cfg.map_sea_zone_ids.size() != cell_count) {
         return false;
     }
 
@@ -467,6 +536,8 @@ ScenarioConfig default_scenario_config() {
     }
 
     cfg.map_cells.assign(static_cast<size_t>(cfg.map_width) * cfg.map_height, 0);
+    cfg.map_cell_tags.assign(static_cast<size_t>(cfg.map_width) * cfg.map_height, 0);
+    cfg.map_sea_zone_ids.assign(static_cast<size_t>(cfg.map_width) * cfg.map_height, 0);
     for (uint32_t y = 0; y < cfg.map_height; ++y) {
         for (uint32_t x = 0; x < cfg.map_width; ++x) {
             uint16_t id = 0;
@@ -479,7 +550,31 @@ ScenarioConfig default_scenario_config() {
             } else {
                 id = 4;
             }
-            cfg.map_cells[static_cast<size_t>(y) * cfg.map_width + x] = id;
+            const size_t idx = static_cast<size_t>(y) * cfg.map_width + x;
+            cfg.map_cells[idx] = id;
+
+            const bool central_sea_lane = (y >= 8 && y <= 9);
+            if (central_sea_lane) {
+                cfg.map_cells[idx] = 0;
+                cfg.map_cell_tags[idx] = static_cast<uint8_t>(sim::GridMap::kTagSea);
+                cfg.map_sea_zone_ids[idx] = static_cast<uint16_t>((x < 12) ? 1 : (x < 24 ? 2 : 3));
+            }
+            if ((x == 11 || x == 23) && y == 8) {
+                cfg.map_cell_tags[idx] = static_cast<uint8_t>(cfg.map_cell_tags[idx] | sim::GridMap::kTagChokepointStrait | sim::GridMap::kTagStrategic);
+            }
+            if ((x == 17 || x == 29) && y == 9) {
+                cfg.map_cell_tags[idx] = static_cast<uint8_t>(cfg.map_cell_tags[idx] | sim::GridMap::kTagChokepointCanal | sim::GridMap::kTagStrategic);
+            }
+
+            if (!central_sea_lane && ((y == 7 || y == 10) && (x % 9 == 0))) {
+                cfg.map_cell_tags[idx] = static_cast<uint8_t>(cfg.map_cell_tags[idx] | sim::GridMap::kTagPort | sim::GridMap::kTagStrategic);
+            }
+            if (!central_sea_lane && (x == 8 || x == 17 || x == 26) && (y == 5 || y == 12)) {
+                cfg.map_cell_tags[idx] = static_cast<uint8_t>(cfg.map_cell_tags[idx] | sim::GridMap::kTagMountainPass | sim::GridMap::kTagStrategic);
+            }
+            if (!central_sea_lane && (y == 6 || y == 11) && (x == 5 || x == 14 || x == 22 || x == 31)) {
+                cfg.map_cell_tags[idx] = static_cast<uint8_t>(cfg.map_cell_tags[idx] | sim::GridMap::kTagRiverCrossing | sim::GridMap::kTagStrategic);
+            }
         }
     }
 
@@ -532,7 +627,14 @@ sim::World world_from_scenario(const ScenarioConfig& config) {
     if (config.map_cells.size() == static_cast<size_t>(config.map_width) * config.map_height) {
         for (uint32_t y = 0; y < config.map_height; ++y) {
             for (uint32_t x = 0; x < config.map_width; ++x) {
-                map.set(x, y, config.map_cells[static_cast<size_t>(y) * config.map_width + x]);
+                const size_t idx = static_cast<size_t>(y) * config.map_width + x;
+                map.set(x, y, config.map_cells[idx]);
+                if (config.map_cell_tags.size() == config.map_cells.size()) {
+                    map.set_cell_tags(x, y, config.map_cell_tags[idx]);
+                }
+                if (config.map_sea_zone_ids.size() == config.map_cells.size()) {
+                    map.set_sea_zone(x, y, config.map_sea_zone_ids[idx]);
+                }
             }
         }
     }
@@ -562,6 +664,10 @@ sim::World world_from_scenario(const ScenarioConfig& config) {
         country.logistics_capacity = sim::Fixed::from_int(c.logistics_capacity);
         country.intelligence_level = sim::Fixed::from_int(c.intelligence_level);
         country.industrial_output = sim::Fixed::from_int(c.industrial_output);
+        country.industrial_capital = sim::Fixed::from_double(std::clamp(c.industrial_output * 1.18, 8.0, 140.0));
+        country.labor_participation = sim::Fixed::from_double(std::clamp(0.52 + c.civilian_morale / 420.0, 0.35, 0.90));
+        country.technology_multiplier = sim::Fixed::from_double(std::clamp(0.55 + c.technology_level / 100.0, 0.40, 2.20));
+        country.gdp_output = sim::Fixed::from_int(c.industrial_output);
         country.technology_level = sim::Fixed::from_int(c.technology_level);
         country.resource_reserve = sim::Fixed::from_int(c.resource_reserve);
         country.supply_level = sim::Fixed::from_int(c.supply_level);
@@ -587,6 +693,11 @@ sim::World world_from_scenario(const ScenarioConfig& config) {
         country.deterrence_posture = sim::Fixed::from_int(35 + static_cast<int64_t>(c.id % 4) * 12);
         country.reputation = sim::Fixed::from_int(c.reputation);
         country.escalation_level = sim::Fixed::from_int(c.escalation_level);
+        country.import_price_index = sim::Fixed::from_double(1.0);
+        country.war_economy_intensity = sim::Fixed::from_double(std::clamp(12.0 + c.diplomatic_stance * 12.0, 0.0, 100.0));
+        country.industrial_decay = sim::Fixed::from_int(0);
+        country.debt_to_gdp = sim::Fixed::from_double(std::clamp(14.0 + static_cast<double>(c.id % 5) * 4.5, 0.0, 100.0));
+        country.war_bond_stock = sim::Fixed::from_int(0);
         country.second_strike_capable = c.second_strike_capable;
         country.has_defense_pact_with = c.defense_pacts;
         country.has_non_aggression_with = c.non_aggression_pacts;

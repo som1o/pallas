@@ -20,11 +20,23 @@ struct BattleDatasetConfig {
     size_t sequence_length = 10;
     float edge_case_rate = 0.045f;
     float validation_tolerance = 0.35f;
+    bool use_self_play = true;
+    size_t self_play_agents = 12;
+    size_t self_play_matches = 1200;
+    float self_play_initial_elo = 1000.0f;
+    float self_play_k_factor = 24.0f;
+    std::string scenario_bank_path = "../data/scenario_bank";
 };
 
 struct BattleSample {
     std::array<float, battle_common::kBattleInputDim> features{};
     uint32_t action = 0;
+    float outcome = 0.0f;
+    float reward_territory = 0.0f;
+    float reward_economy = 0.0f;
+    float reward_population = 0.0f;
+    float reward_diplomacy = 0.0f;
+    float reward_total = 0.0f;
 };
 
 struct BattleDatasetInfo {

@@ -25,6 +25,7 @@
         <div class="row controls-row">
           <button id="stepBtn">Step</button>
           <button id="startBtn">Start</button>
+          <button id="pauseBtn">Pause</button>
           <button id="endBtn">End</button>
           <button id="resetBtn">Reset</button>
         </div>
@@ -45,6 +46,8 @@
         <div class="stats" id="distributed"></div>
         <h2>Diagnostics</h2>
         <div class="stats" id="diagnostics"></div>
+        <h2>Map Tags</h2>
+        <div class="stats" id="mapLegend"></div>
       </section>
 
       <section id="detailsTab" class="tab-panel">
@@ -79,32 +82,7 @@
           <label>Target Country ID <input id="overrideTarget" type="number" min="0" step="1"></label>
           <label>Strategy
             <select id="overrideStrategy">
-              <option value="attack">attack</option>
               <option value="defend">defend</option>
-              <option value="negotiate">negotiate</option>
-              <option value="surrender">surrender</option>
-              <option value="transfer_weapons">transfer_weapons</option>
-              <option value="focus_economy">focus_economy</option>
-              <option value="develop_technology">develop_technology</option>
-              <option value="form_alliance">form_alliance</option>
-              <option value="betray">betray</option>
-              <option value="cyber_operation">cyber_operation</option>
-              <option value="sign_trade_agreement">sign_trade_agreement</option>
-              <option value="cancel_trade_agreement">cancel_trade_agreement</option>
-              <option value="impose_embargo">impose_embargo</option>
-              <option value="invest_in_resource_extraction">invest_in_resource_extraction</option>
-              <option value="reduce_military_upkeep">reduce_military_upkeep</option>
-              <option value="suppress_dissent">suppress_dissent</option>
-              <option value="hold_elections">hold_elections</option>
-              <option value="coup_attempt">coup_attempt</option>
-              <option value="propose_defense_pact">propose_defense_pact</option>
-              <option value="propose_non_aggression">propose_non_aggression</option>
-              <option value="break_treaty">break_treaty</option>
-              <option value="request_intel">request_intel</option>
-              <option value="deploy_units">deploy_units</option>
-              <option value="tactical_nuke">tactical_nuke</option>
-              <option value="strategic_nuke">strategic_nuke</option>
-              <option value="cyber_attack">cyber_attack</option>
             </select>
           </label>
           <label>Terms Type <input id="overrideTermsType" type="text" placeholder="alliance"></label>

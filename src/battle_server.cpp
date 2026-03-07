@@ -114,6 +114,19 @@ std::string strip_query(const std::string& path) {
     return path.substr(0, q);
 }
 
+std::string json_string_array(const std::vector<std::string>& values) {
+    std::ostringstream oss;
+    oss << '[';
+    for (size_t i = 0; i < values.size(); ++i) {
+        if (i > 0) {
+            oss << ',';
+        }
+        oss << '"' << pallas::util::json_escape(values[i]) << '"';
+    }
+    oss << ']';
+    return oss.str();
+}
+
 size_t parse_size_env(const char* var_name, size_t fallback) {
     const char* raw = std::getenv(var_name);
     if (raw == nullptr || *raw == '\0') {
@@ -412,6 +425,12 @@ std::string BattleServer::content_type_for(const std::string& path) const {
     if (path.size() >= 3 && path.substr(path.size() - 3) == ".js") {
         return "application/javascript";
     }
+    if (path.size() >= 5 && path.substr(path.size() - 5) == ".json") {
+        return "application/json";
+    }
+    if (path.size() >= 4 && path.substr(path.size() - 4) == ".svg") {
+        return "image/svg+xml";
+    }
     return "text/plain";
 }
 
@@ -665,6 +684,56 @@ std::string BattleServer::handle_request(const std::string& method,
         *status = 200;
         *content_type = "application/json";
         return engine_->current_diagnostics_json();
+    }
+
+    if (clean_path == "/api/meta") {
+        if (method != "GET") {
+            *status = 405;
+            return "{\"error\":\"method not allowed\"}";
+        }
+
+        std::vector<std::string> strategies;
+        strategies.reserve(pallas::strategy::strategy_lookup().size());
+        for (const auto& kv : pallas::strategy::strategy_lookup()) {
+            strategies.push_back(kv.first);
+        }
+        std::sort(strategies.begin(), strategies.end());
+
+        const std::vector<std::string> targeted_strategies = {
+            "attack",
+            "negotiate",
+            "transfer_weapons",
+            "form_alliance",
+            "betray",
+            "cyber_operation",
+            "sign_trade_agreement",
+            "cancel_trade_agreement",
+            "impose_embargo",
+            "propose_defense_pact",
+            "propose_non_aggression",
+            "break_treaty",
+            "request_intel",
+            "deploy_units",
+            "tactical_nuke",
+            "strategic_nuke",
+            "cyber_attack"
+        };
+
+        std::ostringstream oss;
+        oss << "{";
+        oss << "\"api_version\":1,";
+        oss << "\"max_upload_bytes\":" << max_upload_bytes_ << ',';
+        oss << "\"control_routes\":"
+            << "[\"/api/control/step\",\"/api/control/start\",\"/api/control/pause\",\"/api/control/end\",\"/api/control/reset\",\"/api/control/speed\",\"/api/control/duration\",\"/api/control/override\"],";
+        oss << "\"read_routes\":"
+            << "[\"/api/state\",\"/api/leaderboard\",\"/api/models\",\"/api/diagnostics\",\"/api/meta\"],";
+        oss << "\"strategies\":" << json_string_array(strategies) << ',';
+        oss << "\"targeted_strategies\":" << json_string_array(targeted_strategies);
+        oss << "}";
+
+        *status = 200;
+        *content_type = "application/json";
+        return oss.str();
     }
 
     if (clean_path == "/api/upload-model") {

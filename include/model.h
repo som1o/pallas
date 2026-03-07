@@ -6,6 +6,7 @@
 #include "linear.h"
 #include <array>
 #include <cstdint>
+#include <deque>
 #include <memory>
 #include <random>
 #include <string>
@@ -203,6 +204,7 @@ private:
     uint64_t adam_t_;
     std::mt19937 dropout_rng_;
     std::uniform_real_distribution<float> dropout_dist_;
+    std::unordered_map<uint16_t, std::deque<std::array<float, battle_common::kBattleBaseInputDim>>> temporal_history_;
 };
 
 #endif

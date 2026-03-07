@@ -56,6 +56,11 @@ TrainConfig load_train_config(const std::string& config_path) {
             if (j.contains("label_smoothing")) cfg.label_smoothing = j["label_smoothing"].get<float>();
             if (j.contains("use_class_weights")) cfg.use_class_weights = j["use_class_weights"].get<bool>();
             if (j.contains("class_weights_path")) cfg.class_weights_path = j["class_weights_path"].get<std::string>();
+            if (j.contains("use_actor_critic")) cfg.use_actor_critic = j["use_actor_critic"].get<bool>();
+            if (j.contains("policy_loss_weight")) cfg.policy_loss_weight = j["policy_loss_weight"].get<float>();
+            if (j.contains("value_loss_weight")) cfg.value_loss_weight = j["value_loss_weight"].get<float>();
+            if (j.contains("reward_scale")) cfg.reward_scale = j["reward_scale"].get<float>();
+            if (j.contains("entropy_coeff")) cfg.entropy_coeff = j["entropy_coeff"].get<float>();
         } catch (...) {
             return cfg;
         }
@@ -89,6 +94,17 @@ TrainConfig load_train_config(const std::string& config_path) {
                     cfg.use_class_weights = (v == "true" || v == "1" || v == "yes");
                 } else if (s.rfind("class_weights_path:", 0) == 0) {
                     cfg.class_weights_path = parse_value("class_weights_path:");
+                } else if (s.rfind("use_actor_critic:", 0) == 0) {
+                    const std::string v = parse_value("use_actor_critic:");
+                    cfg.use_actor_critic = (v == "true" || v == "1" || v == "yes");
+                } else if (s.rfind("policy_loss_weight:", 0) == 0) {
+                    cfg.policy_loss_weight = std::stof(parse_value("policy_loss_weight:"));
+                } else if (s.rfind("value_loss_weight:", 0) == 0) {
+                    cfg.value_loss_weight = std::stof(parse_value("value_loss_weight:"));
+                } else if (s.rfind("reward_scale:", 0) == 0) {
+                    cfg.reward_scale = std::stof(parse_value("reward_scale:"));
+                } else if (s.rfind("entropy_coeff:", 0) == 0) {
+                    cfg.entropy_coeff = std::stof(parse_value("entropy_coeff:"));
                 }
             } catch (...) {
             }
@@ -159,6 +175,22 @@ bool validate_train_config(const TrainConfig& cfg, std::string& error_message) {
     }
     if (cfg.weight_decay < 0.0f) {
         error_message = "weight_decay must be >= 0";
+        return false;
+    }
+    if (cfg.policy_loss_weight <= 0.0f) {
+        error_message = "policy_loss_weight must be > 0";
+        return false;
+    }
+    if (cfg.value_loss_weight < 0.0f) {
+        error_message = "value_loss_weight must be >= 0";
+        return false;
+    }
+    if (cfg.reward_scale <= 0.0f) {
+        error_message = "reward_scale must be > 0";
+        return false;
+    }
+    if (cfg.entropy_coeff < 0.0f) {
+        error_message = "entropy_coeff must be >= 0";
         return false;
     }
     return true;

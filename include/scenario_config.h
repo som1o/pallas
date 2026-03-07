@@ -62,6 +62,8 @@ struct ScenarioConfig {
     uint32_t map_width = 36;
     uint32_t map_height = 18;
     std::vector<uint16_t> map_cells;
+    std::vector<uint8_t> map_cell_tags;
+    std::vector<uint16_t> map_sea_zone_ids;
     std::vector<ScenarioModelProfile> models;
     std::vector<ScenarioCountryConfig> countries;
 };

@@ -14,18 +14,25 @@ class BattleBatchLoader {
 public:
     BattleBatchLoader(const std::vector<std::array<float, battle_common::kBattleInputDim>>* features,
                       const std::vector<uint32_t>* actions,
+                      const std::vector<float>* outcomes,
+                      const std::vector<float>* rewards,
                       const std::vector<size_t>& indices,
                       size_t batch_size,
                       bool shuffle,
                       uint32_t seed = 1234);
 
     void reset();
-    bool next(Tensor& inputs, std::vector<uint32_t>& targets);
+    bool next(Tensor& inputs,
+              std::vector<uint32_t>& targets,
+              std::vector<float>& outcomes,
+              std::vector<float>& rewards);
     size_t steps_per_epoch() const;
 
 private:
     const std::vector<std::array<float, battle_common::kBattleInputDim>>* features_;
     const std::vector<uint32_t>* actions_;
+    const std::vector<float>* outcomes_;
+    const std::vector<float>* rewards_;
     size_t batch_size_;
     std::vector<size_t> indices_;
     size_t cursor_;

@@ -90,7 +90,7 @@ public:
     std::string team_for_country(uint16_t country_id) const;
 
 private:
-    WorldSnapshot build_world_snapshot(const sim::World& world) const;
+    WorldSnapshot build_world_snapshot(const sim::World& world, uint16_t observer_country_id = 0) const;
     sim::Country* find_country(sim::World& world, uint16_t id) const;
     const sim::Country* find_country(const sim::World& world, uint16_t id) const;
 

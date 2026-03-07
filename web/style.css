@@ -192,7 +192,7 @@ h2 {
 
 .controls-row {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 6px;
 }
 
@@ -467,6 +467,10 @@ input[type="range"] {
   .sidebar.collapsed {
     max-height: 0;
     width: 100%;
+  }
+
+  .controls-row {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
   #map {

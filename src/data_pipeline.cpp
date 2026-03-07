@@ -1,4 +1,5 @@
 #include "data_pipeline.h"
+#include "scenario_config.h"
 #include "strategy_utils.h"
 
 #include <algorithm>
@@ -6,10 +7,14 @@
 #include <cmath>
 #include <fstream>
 #include <iomanip>
+#include <limits>
 #include <nlohmann/json.hpp>
+#include <numeric>
 #include <random>
 #include <sstream>
 #include <stdexcept>
+#include <filesystem>
+#include <unordered_map>
 #include <vector>
 
 namespace {
@@ -61,8 +66,8 @@ float sample_noise(std::mt19937& rng, float sigma) {
 }
 
 uint32_t sample_action_from_scores(std::mt19937& rng,
-                                   const std::array<float, battle_common::kBattleOutputDim>& scores) {
-    std::array<float, battle_common::kBattleOutputDim> probs{};
+                                   const std::array<float, battle_common::kBattlePolicyActionDim>& scores) {
+    std::array<float, battle_common::kBattlePolicyActionDim> probs{};
     float max_score = scores[0];
     for (size_t i = 1; i < scores.size(); ++i) {
         max_score = std::max(max_score, scores[i]);
@@ -96,7 +101,7 @@ uint32_t sample_action_from_scores(std::mt19937& rng,
 uint32_t action_from_json(const nlohmann::json& value) {
     if (value.is_number_integer()) {
         const int v = value.get<int>();
-        if (v >= 0 && v < static_cast<int>(battle_common::kBattleOutputDim)) {
+        if (v >= 0 && v < static_cast<int>(battle_common::kBattlePolicyActionDim)) {
             return static_cast<uint32_t>(v);
         }
         return battle_common::kActionDefend;
@@ -110,7 +115,7 @@ uint32_t action_from_json(const nlohmann::json& value) {
 }
 
 struct ClusterProfile {
-    std::array<float, battle_common::kBattleInputDim> base{};
+    std::array<float, battle_common::kBattleBaseInputDim> base{};
     std::array<float, 6> latent_mean{};
     std::array<float, 6> latent_sigma{};
 };
@@ -220,13 +225,13 @@ std::array<float, 6> sample_latent(std::mt19937& rng,
     return out;
 }
 
-std::array<float, battle_common::kBattleInputDim> sample_state(std::mt19937& rng,
+std::array<float, battle_common::kBattleBaseInputDim> sample_state(std::mt19937& rng,
                                                                 const ClusterProfile& cluster,
                                                                 const std::array<float, 6>& latent,
                                                                 float progress,
                                                                 float escalation,
                                                                 RareEvent event) {
-    std::array<float, battle_common::kBattleInputDim> f = cluster.base;
+    std::array<float, battle_common::kBattleBaseInputDim> f = cluster.base;
 
     const float sec = latent[0];
     const float eco = latent[1];
@@ -364,11 +369,11 @@ std::array<float, battle_common::kBattleInputDim> sample_state(std::mt19937& rng
     return f;
 }
 
-std::array<float, battle_common::kBattleOutputDim> score_actions(
+std::array<float, battle_common::kBattlePolicyActionDim> score_actions(
     std::mt19937& rng,
-    const std::array<float, battle_common::kBattleInputDim>& f,
+    const std::array<float, battle_common::kBattleBaseInputDim>& f,
     float progress) {
-    std::array<float, battle_common::kBattleOutputDim> s{};
+    std::array<float, battle_common::kBattlePolicyActionDim> s{};
 
     s[battle_common::kActionAttack] =
         1.9f * f[0] + 1.1f * f[2] + 0.9f * f[8] + 0.7f * f[15] + 0.6f * f[31] -
@@ -476,10 +481,10 @@ std::array<float, battle_common::kBattleOutputDim> score_actions(
     return s;
 }
 
-bool validate_sample_heuristics(const std::array<float, battle_common::kBattleInputDim>& f,
+bool validate_sample_heuristics(const std::array<float, battle_common::kBattleBaseInputDim>& f,
                                 uint32_t action,
                                 float tolerance) {
-    if (action >= battle_common::kBattleOutputDim) {
+    if (action >= battle_common::kBattlePolicyActionDim) {
         return false;
     }
 
@@ -608,7 +613,7 @@ nlohmann::json synthesize_dataset(const BattleDatasetConfig& config) {
                 lv = std::clamp(lv + latent_rw(rng), -2.5f, 2.5f);
             }
 
-            std::array<float, battle_common::kBattleInputDim> f = sample_state(
+            std::array<float, battle_common::kBattleBaseInputDim> f = sample_state(
                 rng,
                 cluster,
                 latent,
@@ -616,7 +621,7 @@ nlohmann::json synthesize_dataset(const BattleDatasetConfig& config) {
                 escalation,
                 event);
 
-            const std::array<float, battle_common::kBattleOutputDim> action_scores = score_actions(rng, f, progress);
+            const std::array<float, battle_common::kBattlePolicyActionDim> action_scores = score_actions(rng, f, progress);
             uint32_t action = sample_action_from_scores(rng, action_scores);
             if (!validate_sample_heuristics(f, action, validation_tolerance)) {
                 continue;
@@ -647,39 +652,557 @@ nlohmann::json synthesize_dataset(const BattleDatasetConfig& config) {
     return root;
 }
 
+float clamp_unit(float value) {
+    return std::clamp(value, 0.0f, 1.0f);
+}
+
+float clamp_signed(float value) {
+    return std::clamp(value, -1.0f, 1.0f);
+}
+
+float action_to_index(Strategy strategy) {
+    return static_cast<float>(static_cast<uint32_t>(strategy));
+}
+
+float norm_percent(int64_t milli) {
+    return clamp_unit(static_cast<float>(milli) / 100000.0f);
+}
+
+float norm_signed_percent(int64_t milli) {
+    return clamp_unit(0.5f + static_cast<float>(milli) / 200000.0f);
+}
+
+int64_t total_strength_milli(const sim::Country& country) {
+    return country.military.units_infantry.raw() +
+           country.military.units_armor.raw() * 2 +
+           country.military.units_artillery.raw() * 2 +
+           country.military.units_air_fighter.raw() * 4 +
+           country.military.units_air_bomber.raw() * 4 +
+           country.military.units_naval_surface.raw() * 5 +
+           country.military.units_naval_submarine.raw() * 6;
+}
+
+std::array<float, battle_common::kBattleBaseInputDim> encode_base_features(const sim::World& world,
+                                                                            const sim::Country& self) {
+    std::array<float, battle_common::kBattleBaseInputDim> out{};
+    auto set_feature = [&](size_t idx, float value) {
+        if (idx < out.size()) {
+            out[idx] = clamp_unit(value);
+        }
+    };
+
+    int64_t strongest_neighbor = 0;
+    int64_t weakest_neighbor = std::numeric_limits<int64_t>::max();
+    int64_t neighbor_sum = 0;
+    float trust_low = 1.0f;
+    float trust_high = 0.0f;
+    float trust_sum = 0.0f;
+    float intel_best = 0.0f;
+    float intel_worst = 1.0f;
+    float intel_sum = 0.0f;
+    size_t neighbor_count = 0;
+
+    const int64_t self_strength = std::max<int64_t>(1, total_strength_milli(self));
+    for (const sim::Country& other : world.countries()) {
+        if (other.id == self.id) {
+            continue;
+        }
+        const bool adjacent = std::find(self.adjacent_country_ids.begin(),
+                                        self.adjacent_country_ids.end(),
+                                        other.id) != self.adjacent_country_ids.end();
+        if (!adjacent) {
+            continue;
+        }
+        const int64_t other_strength = std::max<int64_t>(0, total_strength_milli(other));
+        strongest_neighbor = std::max(strongest_neighbor, other_strength);
+        weakest_neighbor = std::min(weakest_neighbor, other_strength);
+        neighbor_sum += other_strength;
+        const auto trust_it = self.trust_scores.find(other.id);
+        const float trust = trust_it == self.trust_scores.end() ? 0.50f : norm_percent(trust_it->second.raw());
+        trust_low = std::min(trust_low, trust);
+        trust_high = std::max(trust_high, trust);
+        trust_sum += trust;
+        const auto intel_it = self.intel_on_enemy.find(other.id);
+        const float intel = intel_it == self.intel_on_enemy.end() ? norm_percent(self.intelligence_level.raw()) : norm_percent(intel_it->second.raw());
+        intel_best = std::max(intel_best, intel);
+        intel_worst = std::min(intel_worst, intel);
+        intel_sum += intel;
+        ++neighbor_count;
+    }
+
+    if (weakest_neighbor == std::numeric_limits<int64_t>::max()) {
+        weakest_neighbor = 0;
+    }
+
+    const float self_strength_norm = clamp_unit(static_cast<float>(self_strength) / 1000000.0f);
+    const float strongest_neighbor_norm = clamp_unit(static_cast<float>(strongest_neighbor) / 1000000.0f);
+    const float weakest_neighbor_norm = clamp_unit(static_cast<float>(weakest_neighbor) / 1000000.0f);
+    const float avg_neighbor_norm = neighbor_count == 0
+        ? 0.0f
+        : clamp_unit(static_cast<float>(neighbor_sum / static_cast<int64_t>(neighbor_count)) / 1000000.0f);
+    const float strength_delta = clamp_unit(0.5f + (self_strength_norm - strongest_neighbor_norm) * 0.8f);
+    const float trust_avg = neighbor_count == 0 ? 0.5f : clamp_unit(trust_sum / static_cast<float>(neighbor_count));
+    const float intel_avg = neighbor_count == 0 ? norm_percent(self.intelligence_level.raw()) : clamp_unit(intel_sum / static_cast<float>(neighbor_count));
+
+    set_feature(0, norm_percent(self.military.units_infantry.raw()));
+    set_feature(1, norm_percent(self.military.units_armor.raw() * 2));
+    set_feature(2, norm_percent(self.military.units_artillery.raw() * 2));
+    set_feature(3, norm_percent(self.military.units_air_fighter.raw() * 4));
+    set_feature(4, norm_percent(self.military.units_air_bomber.raw() * 4));
+    set_feature(5, norm_percent(self.military.units_naval_surface.raw() * 5));
+    set_feature(6, norm_percent(self.military.units_naval_submarine.raw() * 6));
+    set_feature(7, norm_percent(self.supply_level.raw()));
+    set_feature(8, norm_percent(self.supply_capacity.raw()));
+    set_feature(9, norm_percent(self.economic_stability.raw()));
+    set_feature(10, norm_percent(self.civilian_morale.raw()));
+    set_feature(11, norm_percent(self.logistics_capacity.raw()));
+    set_feature(12, norm_percent(self.intelligence_level.raw()));
+    set_feature(13, norm_percent(self.industrial_output.raw()));
+    set_feature(14, norm_percent(self.technology_level.raw()));
+    set_feature(15, norm_percent(self.resource_reserve.raw()));
+    set_feature(16, norm_percent(self.reputation.raw()));
+    set_feature(17, norm_percent(self.escalation_level.raw()));
+    set_feature(18, self.second_strike_capable ? 1.0f : 0.0f);
+    set_feature(19, static_cast<float>(self.diplomatic_stance) / 2.0f);
+    set_feature(20, norm_percent(self.weather_severity.raw()));
+    set_feature(21, norm_percent(self.seasonal_effect.raw()));
+    set_feature(22, norm_percent(self.supply_stockpile.raw()));
+    set_feature(23, norm_percent(self.terrain.mountains.raw()));
+    set_feature(24, norm_percent(self.terrain.forests.raw()));
+    set_feature(25, norm_percent(self.terrain.urban.raw()));
+    set_feature(26, norm_percent(self.technology.missile_defense.raw()));
+    set_feature(27, norm_percent(self.technology.cyber_warfare.raw()));
+    set_feature(28, norm_percent(self.technology.electronic_warfare.raw()));
+    set_feature(29, norm_percent(self.technology.drone_operations.raw()));
+    set_feature(30, norm_percent(self.resources.oil.raw()));
+    set_feature(31, norm_percent(self.resources.minerals.raw()));
+    set_feature(32, norm_percent(self.resources.food.raw()));
+    set_feature(33, norm_percent(self.resources.rare_earth.raw()));
+    set_feature(34, norm_percent(self.resource_oil_reserves.raw()));
+    set_feature(35, norm_percent(self.resource_minerals_reserves.raw()));
+    set_feature(36, norm_percent(self.resource_food_reserves.raw()));
+    set_feature(37, norm_percent(self.resource_rare_earth_reserves.raw()));
+    set_feature(38, norm_percent(self.military_upkeep.raw()));
+    set_feature(39, norm_percent(self.faction_military.raw()));
+    set_feature(40, norm_percent(self.faction_industrial.raw()));
+    set_feature(41, norm_percent(self.faction_civilian.raw()));
+    set_feature(42, norm_percent(self.politics.government_stability.raw()));
+    set_feature(43, norm_percent(self.politics.public_dissent.raw()));
+    set_feature(44, norm_percent(self.politics.corruption.raw()));
+    set_feature(45, norm_percent(self.coup_risk.raw()));
+    set_feature(46, norm_percent(self.draft_level.raw()));
+    set_feature(47, norm_percent(self.war_weariness.raw()));
+    set_feature(48, norm_signed_percent(self.trade_balance.raw()));
+    set_feature(49, clamp_unit(static_cast<float>(self.trade_partners.size()) / 8.0f));
+    set_feature(50, clamp_unit(static_cast<float>(self.has_defense_pact_with.size()) / 6.0f));
+    set_feature(51, clamp_unit(static_cast<float>(self.has_non_aggression_with.size()) / 6.0f));
+    set_feature(52, clamp_unit(static_cast<float>(self.has_trade_treaty_with.size()) / 6.0f));
+    set_feature(53, clamp_unit(static_cast<float>(self.adjacent_country_ids.size()) / 12.0f));
+    set_feature(54, clamp_unit(static_cast<float>(self.allied_country_ids.size()) / 8.0f));
+    set_feature(55, strongest_neighbor_norm);
+    set_feature(56, weakest_neighbor_norm);
+    set_feature(57, avg_neighbor_norm);
+    set_feature(58, strength_delta);
+    set_feature(59, intel_best);
+    set_feature(60, neighbor_count == 0 ? 0.0f : intel_worst);
+    set_feature(61, intel_avg);
+    set_feature(62, trust_avg);
+    set_feature(63, trust_high);
+    set_feature(64, trust_low);
+    set_feature(65, clamp_unit(strength_delta * 0.65f + intel_best * 0.25f));
+    set_feature(66, clamp_unit((1.0f - norm_percent(self.economic_stability.raw())) * 0.35f + norm_percent(self.war_weariness.raw()) * 0.30f + norm_percent(self.coup_risk.raw()) * 0.35f));
+    set_feature(67, norm_percent(self.nuclear_readiness.raw()));
+    set_feature(68, norm_percent(self.deterrence_posture.raw()));
+    set_feature(69, trust_avg);
+    set_feature(70, static_cast<float>(world.current_tick() % 1000U) / 1000.0f);
+    set_feature(71, neighbor_count > 0 ? 1.0f : 0.0f);
+    set_feature(72, 0.0f);
+    set_feature(73, strongest_neighbor_norm);
+    set_feature(74, clamp_unit(1.0f - norm_percent(self.supply_level.raw())));
+    set_feature(75, clamp_unit(static_cast<float>(self.has_defense_pact_with.size() + self.has_non_aggression_with.size()) / 10.0f));
+    set_feature(76, clamp_unit(norm_percent(self.military.units_naval_surface.raw() + self.military.units_naval_submarine.raw())));
+    set_feature(77, clamp_unit(norm_percent(self.military.units_air_fighter.raw() + self.military.units_air_bomber.raw())));
+    set_feature(78, clamp_unit(1.0f - (norm_percent(self.resource_oil_reserves.raw()) + norm_percent(self.resource_food_reserves.raw())) * 0.5f));
+    set_feature(79, clamp_unit(1.0f - norm_percent(self.supply_level.raw())));
+    set_feature(80, strongest_neighbor_norm);
+    set_feature(81, weakest_neighbor_norm);
+    set_feature(82, avg_neighbor_norm);
+    set_feature(83, trust_low);
+    set_feature(84, trust_high);
+    set_feature(85, trust_avg);
+    set_feature(86, intel_avg);
+    set_feature(87, intel_best);
+    set_feature(88, clamp_unit(static_cast<float>(self.betrayal_tick_log.size()) / 6.0f));
+    set_feature(89, clamp_unit(static_cast<float>(std::max<int64_t>(0, self.strategic_depth.raw())) / 6000.0f));
+
+    return out;
+}
+
+std::vector<ScenarioConfig> load_scenario_bank(const std::string& scenario_bank_path) {
+    std::vector<ScenarioConfig> scenarios;
+    if (scenario_bank_path.empty()) {
+        return scenarios;
+    }
+
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    if (!fs::exists(scenario_bank_path, ec) || !fs::is_directory(scenario_bank_path, ec)) {
+        return scenarios;
+    }
+
+    std::vector<std::string> files;
+    for (const auto& entry : fs::directory_iterator(scenario_bank_path, ec)) {
+        if (ec || !entry.is_regular_file()) {
+            continue;
+        }
+        const std::string ext = entry.path().extension().string();
+        if (ext == ".json") {
+            files.push_back(entry.path().string());
+        }
+    }
+    std::sort(files.begin(), files.end());
+
+    for (const std::string& file : files) {
+        ScenarioConfig cfg;
+        std::string error;
+        if (load_scenario_config(file, &cfg, &error)) {
+            scenarios.push_back(std::move(cfg));
+        }
+    }
+    return scenarios;
+}
+
+float average_trust_norm(const sim::Country& country) {
+    if (country.trust_scores.empty()) {
+        return 0.5f;
+    }
+    double total = 0.0;
+    for (const auto& kv : country.trust_scores) {
+        total += norm_percent(kv.second.raw());
+    }
+    return clamp_unit(static_cast<float>(total / static_cast<double>(country.trust_scores.size())));
+}
+
+struct RewardSnapshot {
+    uint32_t territory = 0;
+    float economy = 0.0f;
+    double population = 1.0;
+    float diplomacy = 0.5f;
+};
+
+RewardSnapshot build_reward_snapshot(const sim::Country& country) {
+    RewardSnapshot s;
+    s.territory = country.territory_cells;
+    s.economy = norm_percent(country.economic_stability.raw());
+    s.population = static_cast<double>(std::max<uint64_t>(1, country.population));
+    s.diplomacy = clamp_unit((norm_percent(country.reputation.raw()) + average_trust_norm(country)) * 0.5f);
+    return s;
+}
+
+nlohmann::json synthesize_self_play_dataset(const BattleDatasetConfig& config) {
+    std::mt19937 rng(config.rng_seed);
+    const size_t target_samples = std::max<size_t>(config.synthetic_samples, 512);
+    const size_t matches = std::max<size_t>(config.self_play_matches, target_samples / std::max<size_t>(8, config.sequence_length));
+    std::vector<ScenarioConfig> scenario_bank = load_scenario_bank(config.scenario_bank_path);
+    if (scenario_bank.empty()) {
+        scenario_bank.push_back(default_scenario_config());
+    }
+
+    struct TrajectoryStep {
+        size_t sequence_id = 0;
+        size_t step = 0;
+        uint16_t actor_country_id = 0;
+        uint32_t action = battle_common::kActionDefend;
+        std::array<float, battle_common::kBattleBaseInputDim> features{};
+    };
+
+    nlohmann::json root = nlohmann::json::array();
+    size_t sequence_id = 0;
+
+    for (size_t match_idx = 0; match_idx < matches && root.size() < target_samples; ++match_idx) {
+        ScenarioConfig scenario = scenario_bank[match_idx % scenario_bank.size()];
+        if (scenario.countries.empty()) {
+            scenario = default_scenario_config();
+        }
+        if (scenario.models.empty()) {
+            scenario.models = default_scenario_config().models;
+        }
+
+        sim::World world = world_from_scenario(scenario);
+        battle::ModelManager manager;
+
+        ModelConfig model_cfg;
+        model_cfg.hidden_layers = {256, 192, 128};
+        model_cfg.activation = "leaky_relu";
+        model_cfg.norm = "layernorm";
+        model_cfg.dropout_prob = 0.0f;
+        model_cfg.use_dropout = false;
+
+        for (const ScenarioCountryConfig& country_cfg : scenario.countries) {
+            auto model = std::make_shared<Model>(battle_common::kBattleInputDim, battle_common::kBattleOutputDim, model_cfg);
+            model->set_training(false);
+            model->set_inference_only(true);
+            battle::ManagedModel managed;
+            managed.name = country_cfg.controller.empty()
+                ? ("self_play_agent_" + std::to_string(country_cfg.id))
+                : country_cfg.controller + "_m" + std::to_string(match_idx);
+            managed.team = country_cfg.team.empty() ? ("team_" + std::to_string(country_cfg.id)) : country_cfg.team;
+            managed.model = model;
+            managed.controlled_country_ids = {country_cfg.id};
+            manager.add_model(managed);
+        }
+
+        std::unordered_map<uint16_t, RewardSnapshot> initial;
+        for (const sim::Country& c : world.countries()) {
+            initial[c.id] = build_reward_snapshot(c);
+        }
+
+        std::vector<TrajectoryStep> trajectory;
+        trajectory.reserve(static_cast<size_t>(scenario.ticks_per_match) * scenario.countries.size());
+
+        const size_t ticks = static_cast<size_t>(std::max<uint64_t>(1, scenario.ticks_per_match));
+        for (size_t tick = 0; tick < ticks && root.size() + trajectory.size() < target_samples; ++tick) {
+            auto decisions = manager.gather_decisions(world);
+            manager.coordinate_and_message(world, &decisions);
+
+            for (const battle::DecisionEnvelope& envelope : decisions) {
+                const auto world_it = std::find_if(world.countries().begin(), world.countries().end(), [&](const sim::Country& c) {
+                    return c.id == envelope.decision.actor_country_id;
+                });
+                if (world_it == world.countries().end()) {
+                    continue;
+                }
+
+                TrajectoryStep step;
+                step.sequence_id = sequence_id;
+                step.step = tick;
+                step.actor_country_id = envelope.decision.actor_country_id;
+                step.action = static_cast<uint32_t>(envelope.decision.strategy);
+                step.features = encode_base_features(world, *world_it);
+                trajectory.push_back(step);
+            }
+
+            manager.apply_decisions(world, decisions);
+            world.run_tick();
+        }
+
+        std::unordered_map<uint16_t, RewardSnapshot> final_state;
+        uint32_t total_cells = 0;
+        for (const sim::Country& c : world.countries()) {
+            final_state[c.id] = build_reward_snapshot(c);
+            total_cells += c.territory_cells;
+        }
+        if (total_cells == 0) {
+            total_cells = std::max<uint32_t>(1, scenario.map_width * scenario.map_height);
+        }
+
+        for (const TrajectoryStep& step : trajectory) {
+            const auto it_initial = initial.find(step.actor_country_id);
+            const auto it_final = final_state.find(step.actor_country_id);
+            if (it_initial == initial.end() || it_final == final_state.end()) {
+                continue;
+            }
+
+            const RewardSnapshot& start = it_initial->second;
+            const RewardSnapshot& finish = it_final->second;
+            const float territory = clamp_signed(2.0f * (static_cast<float>(finish.territory) / static_cast<float>(std::max<uint32_t>(1, total_cells))) - 1.0f);
+            const float economy = clamp_signed((finish.economy - start.economy) * 2.0f);
+            const float population = clamp_signed(static_cast<float>((finish.population / std::max(1.0, start.population)) - 1.0));
+            const float diplomacy = clamp_signed((finish.diplomacy - 0.5f) * 2.0f);
+            const float reward_total = 0.35f * territory + 0.25f * economy + 0.25f * population + 0.15f * diplomacy;
+
+            nlohmann::json item;
+            item["features"] = nlohmann::json::array();
+            for (float x : step.features) {
+                item["features"].push_back(x);
+            }
+            item["action"] = step.action;
+            item["sequence_id"] = step.sequence_id;
+            item["step"] = step.step;
+            item["outcome"] = reward_total;
+            item["reward_territory"] = territory;
+            item["reward_economy"] = economy;
+            item["reward_population"] = population;
+            item["reward_diplomacy"] = diplomacy;
+            item["reward_total"] = reward_total;
+            root.push_back(std::move(item));
+            if (root.size() >= target_samples) {
+                break;
+            }
+        }
+
+        ++sequence_id;
+    }
+
+    if (root.size() < target_samples) {
+        std::ostringstream oss;
+        oss << "Failed to generate self-play match corpus. requested=" << target_samples
+            << " generated=" << root.size();
+        throw std::runtime_error(oss.str());
+    }
+
+    return root;
+}
+
 bool parse_json_samples(const nlohmann::json& root, std::vector<BattleSample>& samples) {
     if (!root.is_array()) {
         return false;
     }
 
-    samples.clear();
-    samples.reserve(root.size());
+    struct RawStep {
+        std::array<float, battle_common::kBattleBaseInputDim> features{};
+        uint32_t action = battle_common::kActionDefend;
+        uint64_t sequence_id = 0;
+        uint64_t step = 0;
+        float outcome = 0.0f;
+        float reward_territory = 0.0f;
+        float reward_economy = 0.0f;
+        float reward_population = 0.0f;
+        float reward_diplomacy = 0.0f;
+        float reward_total = 0.0f;
+    };
+
+    std::vector<BattleSample> direct_samples;
+    std::vector<RawStep> raw_steps;
+    direct_samples.reserve(root.size());
+    raw_steps.reserve(root.size());
+
+    uint64_t fallback_sequence = 0;
     for (const auto& item : root) {
         if (!item.is_object() || !item.contains("features") || !item["features"].is_array() || !item.contains("action")) {
             continue;
         }
+
         const auto& features = item["features"];
-        if (features.size() != battle_common::kBattleInputDim) {
+        const uint32_t action = action_from_json(item["action"]);
+        if (action >= battle_common::kBattlePolicyActionDim) {
+            continue;
+        }
+        const float outcome = item.contains("outcome") && item["outcome"].is_number()
+            ? item["outcome"].get<float>()
+            : 0.0f;
+        const float reward_territory = item.contains("reward_territory") && item["reward_territory"].is_number()
+            ? item["reward_territory"].get<float>()
+            : 0.0f;
+        const float reward_economy = item.contains("reward_economy") && item["reward_economy"].is_number()
+            ? item["reward_economy"].get<float>()
+            : 0.0f;
+        const float reward_population = item.contains("reward_population") && item["reward_population"].is_number()
+            ? item["reward_population"].get<float>()
+            : 0.0f;
+        const float reward_diplomacy = item.contains("reward_diplomacy") && item["reward_diplomacy"].is_number()
+            ? item["reward_diplomacy"].get<float>()
+            : 0.0f;
+        const float reward_total = item.contains("reward_total") && item["reward_total"].is_number()
+            ? item["reward_total"].get<float>()
+            : outcome;
+
+        if (features.size() == battle_common::kBattleInputDim) {
+            BattleSample sample;
+            bool ok = true;
+            for (size_t i = 0; i < battle_common::kBattleInputDim; ++i) {
+                if (!features[i].is_number()) {
+                    ok = false;
+                    break;
+                }
+                sample.features[i] = features[i].get<float>();
+            }
+            if (!ok) {
+                continue;
+            }
+            sample.action = action;
+            sample.outcome = outcome;
+            sample.reward_territory = reward_territory;
+            sample.reward_economy = reward_economy;
+            sample.reward_population = reward_population;
+            sample.reward_diplomacy = reward_diplomacy;
+            sample.reward_total = reward_total;
+            direct_samples.push_back(sample);
             continue;
         }
 
-        BattleSample sample;
+        if (features.size() != battle_common::kBattleBaseInputDim) {
+            continue;
+        }
+
+        RawStep step;
         bool ok = true;
-        for (size_t i = 0; i < battle_common::kBattleInputDim; ++i) {
+        for (size_t i = 0; i < battle_common::kBattleBaseInputDim; ++i) {
             if (!features[i].is_number()) {
                 ok = false;
                 break;
             }
-            sample.features[i] = features[i].get<float>();
+            step.features[i] = features[i].get<float>();
         }
         if (!ok) {
             continue;
         }
 
-        sample.action = action_from_json(item["action"]);
-        if (sample.action >= battle_common::kBattleOutputDim) {
-            continue;
+        step.action = action;
+        step.sequence_id = item.contains("sequence_id") && item["sequence_id"].is_number_unsigned()
+            ? item["sequence_id"].get<uint64_t>()
+            : fallback_sequence;
+        step.step = item.contains("step") && item["step"].is_number_unsigned()
+            ? item["step"].get<uint64_t>()
+            : 0;
+        step.outcome = outcome;
+        step.reward_territory = reward_territory;
+        step.reward_economy = reward_economy;
+        step.reward_population = reward_population;
+        step.reward_diplomacy = reward_diplomacy;
+        step.reward_total = reward_total;
+        raw_steps.push_back(step);
+        ++fallback_sequence;
+    }
+
+    if (!direct_samples.empty()) {
+        samples = std::move(direct_samples);
+        return true;
+    }
+
+    std::sort(raw_steps.begin(), raw_steps.end(), [](const RawStep& a, const RawStep& b) {
+        if (a.sequence_id != b.sequence_id) {
+            return a.sequence_id < b.sequence_id;
         }
+        return a.step < b.step;
+    });
+
+    std::unordered_map<uint64_t, std::vector<std::array<float, battle_common::kBattleBaseInputDim>>> history;
+    samples.clear();
+    samples.reserve(raw_steps.size());
+
+    for (const RawStep& row : raw_steps) {
+        auto& sequence_history = history[row.sequence_id];
+        sequence_history.push_back(row.features);
+        if (sequence_history.size() > battle_common::kBattleTemporalWindow) {
+            sequence_history.erase(sequence_history.begin());
+        }
+
+        BattleSample sample;
+        for (size_t t = 0; t < battle_common::kBattleTemporalWindow; ++t) {
+            const size_t dest_offset = t * battle_common::kBattleBaseInputDim;
+            const bool has_frame = t < sequence_history.size();
+            const size_t source_idx = has_frame ? (sequence_history.size() - 1U - t) : std::numeric_limits<size_t>::max();
+            if (!has_frame) {
+                for (size_t f = 0; f < battle_common::kBattleBaseInputDim; ++f) {
+                    sample.features[dest_offset + f] = 0.0f;
+                }
+                continue;
+            }
+
+            // Store newest frame first to preserve recency for simple feed-forward models.
+            const auto& frame = sequence_history[source_idx];
+            for (size_t f = 0; f < battle_common::kBattleBaseInputDim; ++f) {
+                sample.features[dest_offset + f] = frame[f];
+            }
+        }
+        sample.action = row.action;
+        sample.outcome = row.outcome;
+        sample.reward_territory = row.reward_territory;
+        sample.reward_economy = row.reward_economy;
+        sample.reward_population = row.reward_population;
+        sample.reward_diplomacy = row.reward_diplomacy;
+        sample.reward_total = row.reward_total;
         samples.push_back(sample);
     }
 
@@ -699,7 +1222,7 @@ void write_txt_dataset(const std::string& txt_path, const std::vector<BattleSamp
         }
         out << "f" << i;
     }
-    out << "|action_id|action_name\n";
+    out << "|action_id|action_name|outcome|reward_total|reward_territory|reward_economy|reward_population|reward_diplomacy\n";
 
     out << std::fixed << std::setprecision(6);
     for (const BattleSample& s : samples) {
@@ -707,7 +1230,15 @@ void write_txt_dataset(const std::string& txt_path, const std::vector<BattleSamp
             if (i > 0) out << ',';
             out << s.features[i];
         }
-        out << '|' << s.action << '|' << action_to_name(s.action) << '\n';
+        out << '|' << s.action
+            << '|' << action_to_name(s.action)
+            << '|' << s.outcome
+            << '|' << s.reward_total
+            << '|' << s.reward_territory
+            << '|' << s.reward_economy
+            << '|' << s.reward_population
+            << '|' << s.reward_diplomacy
+            << '\n';
     }
 }
 
@@ -721,7 +1252,7 @@ void write_vocab(const std::string& vocab_path) {
         out << "f" << i << '\n';
     }
 
-    for (size_t i = 0; i < battle_common::kBattleOutputDim; ++i) {
+    for (size_t i = 0; i < battle_common::kBattlePolicyActionDim; ++i) {
         out << action_to_name(static_cast<uint32_t>(i)) << '\n';
     }
 }
@@ -746,7 +1277,7 @@ BattleDatasetInfo prepare_battle_dataset(const BattleDatasetConfig& config,
     }
 
     if (force_rebuild || !root.is_array() || root.empty()) {
-        root = synthesize_dataset(config);
+        root = config.use_self_play ? synthesize_self_play_dataset(config) : synthesize_dataset(config);
         std::ofstream out(config.json_path);
         if (!out) {
             throw std::runtime_error("Failed to write battle json dataset: " + config.json_path);
@@ -777,5 +1308,6 @@ BattleDatasetConfig make_battle_dataset_config(const std::string& data_root) {
     config.json_path = data_root + "/battle_train.json";
     config.txt_path = data_root + "/battle_train.txt";
     config.vocab_path = data_root + "/vocab.txt";
+    config.scenario_bank_path = data_root + "/scenario_bank";
     return config;
 }

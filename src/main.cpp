@@ -1,4 +1,5 @@
 #include "battle_common.h"
+#include "scenario_config.h"
 #include "data_pipeline.h"
 #include "dataloader.h"
 #include "logging.h"
@@ -14,8 +15,10 @@
 #include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <limits>
+#include <nlohmann/json.hpp>
 #include <numeric>
 #include <random>
 #include <sstream>
@@ -47,6 +50,10 @@ struct CliOptions {
     std::string log_dir = "../logs";
     std::string data_dir = "../data";
     std::string inspect_model_path;
+    bool benchmark_only = false;
+    std::string benchmark_bank_path;
+    std::string benchmark_report_path;
+    std::string benchmark_model_path;
 };
 
 CliOptions parse_cli(int argc, char** argv) {
@@ -70,6 +77,14 @@ CliOptions parse_cli(int argc, char** argv) {
             cli.inspect_model_path = argv[++i];
         } else if (arg == "--data-dir" && i + 1 < argc) {
             cli.data_dir = argv[++i];
+        } else if (arg == "--benchmark-only") {
+            cli.benchmark_only = true;
+        } else if (arg == "--benchmark-bank" && i + 1 < argc) {
+            cli.benchmark_bank_path = argv[++i];
+        } else if (arg == "--benchmark-report" && i + 1 < argc) {
+            cli.benchmark_report_path = argv[++i];
+        } else if (arg == "--benchmark-model" && i + 1 < argc) {
+            cli.benchmark_model_path = argv[++i];
         }
     }
     if (const char* env_data = std::getenv("PALLAS_DATA_DIR")) {
@@ -78,6 +93,305 @@ CliOptions parse_cli(int argc, char** argv) {
         }
     }
     return cli;
+}
+
+struct BenchmarkBaseline {
+    uint64_t initial_population = 1;
+    float initial_economy = 0.0f;
+    float initial_diplomacy = 0.5f;
+};
+
+struct BenchmarkAggregate {
+    size_t scenarios = 0;
+    size_t wins = 0;
+    float reward_sum = 0.0f;
+    float rank_sum = 0.0f;
+};
+
+float clamp_unit(float value) {
+    return std::clamp(value, 0.0f, 1.0f);
+}
+
+float clamp_signed(float value) {
+    return std::clamp(value, -1.0f, 1.0f);
+}
+
+float norm_percent(int64_t milli) {
+    return clamp_unit(static_cast<float>(milli) / 100000.0f);
+}
+
+float average_trust_norm(const sim::Country& country) {
+    if (country.trust_scores.empty()) {
+        return 0.5f;
+    }
+    double total = 0.0;
+    for (const auto& kv : country.trust_scores) {
+        total += norm_percent(kv.second.raw());
+    }
+    return clamp_unit(static_cast<float>(total / static_cast<double>(country.trust_scores.size())));
+}
+
+float diplomacy_score(const sim::Country& country) {
+    return clamp_unit((norm_percent(country.reputation.raw()) + average_trust_norm(country)) * 0.5f);
+}
+
+float benchmark_reward(const sim::Country& country,
+                       const BenchmarkBaseline& baseline,
+                       uint32_t total_cells) {
+    const float territory = clamp_signed(2.0f * (static_cast<float>(country.territory_cells) /
+                                                static_cast<float>(std::max<uint32_t>(1, total_cells))) - 1.0f);
+    const float economy = clamp_signed((norm_percent(country.economic_stability.raw()) - baseline.initial_economy) * 2.0f);
+    const float population = clamp_signed(static_cast<float>(
+        (static_cast<double>(std::max<uint64_t>(1, country.population)) /
+         static_cast<double>(std::max<uint64_t>(1, baseline.initial_population))) - 1.0));
+    const float diplomacy = clamp_signed((diplomacy_score(country) - baseline.initial_diplomacy) * 2.0f);
+    return 0.35f * territory + 0.25f * economy + 0.25f * population + 0.15f * diplomacy;
+}
+
+battle::ModelManager build_benchmark_model_manager(const ScenarioConfig& scenario,
+                                                    const Model& trained_model,
+                                                    const ModelConfig& model_config) {
+    battle::ModelManager manager;
+    for (const ScenarioCountryConfig& country : scenario.countries) {
+        auto replica = std::make_shared<Model>(battle_common::kBattleInputDim,
+                                               battle_common::kBattleOutputDim,
+                                               model_config);
+        replica->copy_parameters_from(trained_model);
+        replica->set_training(false);
+        replica->set_inference_only(true);
+
+        battle::ManagedModel managed;
+        const std::string slot_name = country.controller.empty()
+            ? ("benchmark_agent_" + std::to_string(country.id))
+            : country.controller;
+        managed.name = slot_name + "_c" + std::to_string(country.id);
+        managed.team = country.team.empty() ? ("team_" + std::to_string(country.id)) : country.team;
+        managed.model = std::move(replica);
+        managed.controlled_country_ids = {country.id};
+        manager.add_model(managed);
+    }
+    return manager;
+}
+
+bool run_scenario_bank_benchmark(const std::string& bank_path,
+                                 const std::string& report_path,
+                                 const Model& model,
+                                 const ModelConfig& model_config,
+                                 std::string* error_message) {
+    namespace fs = std::filesystem;
+
+    std::error_code ec;
+    if (!fs::exists(bank_path, ec) || !fs::is_directory(bank_path, ec)) {
+        if (error_message != nullptr) {
+            *error_message = "benchmark bank path is missing or not a directory: " + bank_path;
+        }
+        return false;
+    }
+
+    std::vector<std::string> scenario_files;
+    for (const auto& entry : fs::directory_iterator(bank_path, ec)) {
+        if (ec || !entry.is_regular_file()) {
+            continue;
+        }
+        if (entry.path().extension() == ".json") {
+            scenario_files.push_back(entry.path().string());
+        }
+    }
+    std::sort(scenario_files.begin(), scenario_files.end());
+
+    if (scenario_files.empty()) {
+        if (error_message != nullptr) {
+            *error_message = "no benchmark scenarios (*.json) found in: " + bank_path;
+        }
+        return false;
+    }
+
+    nlohmann::json report;
+    report["generated_at_unix"] = static_cast<uint64_t>(std::time(nullptr));
+    report["bank_path"] = bank_path;
+    report["scenarios"] = nlohmann::json::array();
+
+    std::unordered_map<std::string, BenchmarkAggregate> aggregate_by_model;
+    uint64_t total_ticks_simulated = 0;
+
+    for (const std::string& scenario_path : scenario_files) {
+        ScenarioConfig scenario;
+        std::string load_error;
+        if (!load_scenario_config(scenario_path, &scenario, &load_error)) {
+            if (error_message != nullptr) {
+                *error_message = "failed to load scenario '" + scenario_path + "': " + load_error;
+            }
+            return false;
+        }
+
+        sim::World world = world_from_scenario(scenario);
+        battle::ModelManager manager = build_benchmark_model_manager(scenario, model, model_config);
+
+        std::unordered_map<uint16_t, BenchmarkBaseline> baselines;
+        uint32_t total_cells = 0;
+        for (const sim::Country& country : world.countries()) {
+            BenchmarkBaseline baseline;
+            baseline.initial_population = std::max<uint64_t>(1, country.population);
+            baseline.initial_economy = norm_percent(country.economic_stability.raw());
+            baseline.initial_diplomacy = diplomacy_score(country);
+            baselines[country.id] = baseline;
+            total_cells += country.territory_cells;
+        }
+        if (total_cells == 0) {
+            total_cells = std::max<uint32_t>(1, scenario.map_width * scenario.map_height);
+        }
+
+        const uint64_t ticks = std::max<uint64_t>(1, scenario.ticks_per_match);
+        for (uint64_t tick = 0; tick < ticks; ++tick) {
+            auto decisions = manager.gather_decisions(world);
+            manager.coordinate_and_message(world, &decisions);
+            manager.apply_decisions(world, decisions);
+            world.run_tick();
+            ++total_ticks_simulated;
+        }
+
+        std::unordered_map<std::string, std::vector<float>> reward_by_model;
+        for (const sim::Country& country : world.countries()) {
+            auto it = baselines.find(country.id);
+            if (it == baselines.end()) {
+                continue;
+            }
+            const float reward = benchmark_reward(country, it->second, total_cells);
+            const std::string model_name = manager.model_for_country(country.id);
+            reward_by_model[model_name].push_back(reward);
+        }
+
+        struct RankedScore {
+            std::string model_name;
+            float reward = 0.0f;
+        };
+        std::vector<RankedScore> ranked;
+        ranked.reserve(reward_by_model.size());
+        for (const auto& kv : reward_by_model) {
+            float avg = 0.0f;
+            for (float reward : kv.second) {
+                avg += reward;
+            }
+            avg /= static_cast<float>(std::max<size_t>(1, kv.second.size()));
+            ranked.push_back({kv.first, avg});
+        }
+
+        std::sort(ranked.begin(), ranked.end(), [](const RankedScore& a, const RankedScore& b) {
+            if (a.reward == b.reward) {
+                return a.model_name < b.model_name;
+            }
+            return a.reward > b.reward;
+        });
+
+        if (ranked.empty()) {
+            if (error_message != nullptr) {
+                *error_message = "scenario produced no model scores: " + scenario_path;
+            }
+            return false;
+        }
+
+        nlohmann::json score_entries = nlohmann::json::array();
+        for (size_t rank = 0; rank < ranked.size(); ++rank) {
+            const RankedScore& entry = ranked[rank];
+            BenchmarkAggregate& agg = aggregate_by_model[entry.model_name];
+            agg.scenarios += 1;
+            agg.reward_sum += entry.reward;
+            agg.rank_sum += static_cast<float>(rank + 1);
+            if (rank == 0) {
+                agg.wins += 1;
+            }
+
+            nlohmann::json j;
+            j["model"] = entry.model_name;
+            j["reward"] = entry.reward;
+            j["rank"] = rank + 1;
+            score_entries.push_back(std::move(j));
+        }
+
+        nlohmann::json scenario_result;
+        scenario_result["scenario_path"] = scenario_path;
+        scenario_result["scenario_id"] = fs::path(scenario_path).stem().string();
+        scenario_result["ticks"] = ticks;
+        scenario_result["winner_model"] = ranked.front().model_name;
+        scenario_result["winner_reward"] = ranked.front().reward;
+        scenario_result["scores"] = std::move(score_entries);
+        report["scenarios"].push_back(std::move(scenario_result));
+    }
+
+    std::vector<nlohmann::json> leaderboard_rows;
+    leaderboard_rows.reserve(aggregate_by_model.size());
+    for (const auto& kv : aggregate_by_model) {
+        const BenchmarkAggregate& agg = kv.second;
+        nlohmann::json row;
+        row["model"] = kv.first;
+        row["scenarios"] = agg.scenarios;
+        row["wins"] = agg.wins;
+        row["avg_reward"] = agg.scenarios > 0 ? (agg.reward_sum / static_cast<float>(agg.scenarios)) : 0.0f;
+        row["avg_rank"] = agg.scenarios > 0 ? (agg.rank_sum / static_cast<float>(agg.scenarios)) : 0.0f;
+        leaderboard_rows.push_back(std::move(row));
+    }
+
+    std::sort(leaderboard_rows.begin(), leaderboard_rows.end(), [](const nlohmann::json& a, const nlohmann::json& b) {
+        const uint64_t a_wins = a.value("wins", 0ULL);
+        const uint64_t b_wins = b.value("wins", 0ULL);
+        if (a_wins != b_wins) {
+            return a_wins > b_wins;
+        }
+        const double a_reward = a.value("avg_reward", 0.0);
+        const double b_reward = b.value("avg_reward", 0.0);
+        if (a_reward != b_reward) {
+            return a_reward > b_reward;
+        }
+        return a.value("model", std::string()) < b.value("model", std::string());
+    });
+
+    report["scenario_count"] = scenario_files.size();
+    report["ticks_simulated"] = total_ticks_simulated;
+    report["leaderboard"] = leaderboard_rows;
+
+    const fs::path report_fs_path(report_path);
+    if (!report_fs_path.parent_path().empty()) {
+        fs::create_directories(report_fs_path.parent_path(), ec);
+    }
+
+    std::ofstream out(report_path);
+    if (!out) {
+        if (error_message != nullptr) {
+            *error_message = "failed to open benchmark report path: " + report_path;
+        }
+        return false;
+    }
+    out << report.dump(2) << "\n";
+
+    fs::path tsv_path = report_fs_path;
+    if (tsv_path.extension() == ".json") {
+        tsv_path.replace_extension(".tsv");
+    } else {
+        tsv_path += ".tsv";
+    }
+
+    std::ofstream tsv_out(tsv_path.string());
+    if (!tsv_out) {
+        if (error_message != nullptr) {
+            *error_message = "failed to open benchmark TSV path: " + tsv_path.string();
+        }
+        return false;
+    }
+
+    tsv_out << "model\tscenarios\twins\tavg_reward\tavg_rank\n";
+    tsv_out << std::fixed << std::setprecision(6);
+    for (const auto& row : leaderboard_rows) {
+        if (!row.is_object()) {
+            continue;
+        }
+        tsv_out << row.value("model", std::string()) << '\t'
+                << row.value("scenarios", 0ULL) << '\t'
+                << row.value("wins", 0ULL) << '\t'
+                << row.value("avg_reward", 0.0) << '\t'
+                << row.value("avg_rank", 0.0) << '\n';
+    }
+
+    return true;
 }
 
 bool ensure_directory(const std::string& dir) {
@@ -90,7 +404,7 @@ bool ensure_directory(const std::string& dir) {
 }
 
 std::vector<float> load_battle_class_weights(const TrainConfig& train_config) {
-    std::vector<float> weights(battle_common::kBattleOutputDim, 1.0f);
+    std::vector<float> weights(battle_common::kBattlePolicyActionDim, 1.0f);
     if (!train_config.use_class_weights) {
         return weights;
     }
@@ -157,6 +471,240 @@ struct Metrics {
     size_t count = 0;
 };
 
+Tensor slice_logits(const Tensor& logits, size_t offset, size_t size) {
+    const size_t capped = offset < logits.data.size() ? std::min(size, logits.data.size() - offset) : 0;
+    Tensor out({1, capped}, 0.0f);
+    for (size_t i = 0; i < capped; ++i) {
+        out.data[i] = logits.data[offset + i];
+    }
+    return out;
+}
+
+uint32_t strategic_goal_from_action(uint32_t action) {
+    switch (action) {
+        case battle_common::kActionAttack:
+        case battle_common::kActionDeployUnits:
+        case battle_common::kActionCyberAttack:
+        case battle_common::kActionCyberOperation:
+        case battle_common::kActionTacticalNuke:
+        case battle_common::kActionStrategicNuke:
+        case battle_common::kActionBetray:
+        case battle_common::kActionBreakTreaty:
+            return 0;
+        case battle_common::kActionDefend:
+        case battle_common::kActionRequestIntel:
+        case battle_common::kActionProposeDefensePact:
+        case battle_common::kActionProposeNonAggression:
+        case battle_common::kActionSuppressDissent:
+        case battle_common::kActionTransferWeapons:
+            return 1;
+        case battle_common::kActionSignTradeAgreement:
+        case battle_common::kActionCancelTradeAgreement:
+        case battle_common::kActionImposeEmbargo:
+        case battle_common::kActionInvestInResourceExtraction:
+        case battle_common::kActionReduceMilitaryUpkeep:
+            return 2;
+        default:
+            return 3;
+    }
+}
+
+uint32_t target_bucket_from_features(const Tensor& sample) {
+    const float threat = sample.data[55];
+    const float treaty = sample.data[63];
+    if (threat > 0.62f) {
+        return 0;
+    }
+    if (treaty > 0.52f) {
+        return 2;
+    }
+    return 1;
+}
+
+uint32_t commitment_bucket_from_features(const Tensor& sample) {
+    const float attack_opportunity = sample.data[65];
+    const float crisis_pressure = sample.data[66];
+    const float score = attack_opportunity - 0.6f * crisis_pressure;
+    if (score < 0.18f) {
+        return 0;
+    }
+    if (score < 0.42f) {
+        return 1;
+    }
+    return 2;
+}
+
+uint32_t allocation_bucket_from_features(const Tensor& sample) {
+    const float attack_opportunity = sample.data[65];
+    const float crisis_pressure = sample.data[66];
+    const float reserve_stress = sample.data[78];
+    if (attack_opportunity >= crisis_pressure && attack_opportunity >= reserve_stress) {
+        return 0;
+    }
+    if (crisis_pressure >= reserve_stress) {
+        return 1;
+    }
+    return 2;
+}
+
+uint32_t opponent_action_target_from_features(const Tensor& sample) {
+    const float threat = sample.data[55];
+    const float trust = sample.data[69];
+    const float treaty = sample.data[63];
+    if (threat > 0.62f && trust < 0.45f) {
+        return battle_common::kActionAttack;
+    }
+    if (treaty > 0.58f && trust > 0.48f) {
+        return battle_common::kActionProposeDefensePact;
+    }
+    return battle_common::kActionDefend;
+}
+
+float value_target_from_action(uint32_t action) {
+    const uint32_t goal = strategic_goal_from_action(action);
+    if (goal == 0) {
+        return 0.75f;
+    }
+    if (goal == 1) {
+        return 0.55f;
+    }
+    if (goal == 2) {
+        return 0.50f;
+    }
+    return 0.60f;
+}
+
+float append_multitask_loss_and_grad(const Tensor& logits,
+                                     const Tensor& sample,
+                                     uint32_t action_target,
+                                     float outcome_target,
+                                     float reward_total,
+                                     const TrainConfig& train_config,
+                                     float action_weight,
+                                     Tensor& grad_out) {
+    grad_out = Tensor(logits.shape, 0.0f);
+
+    const Tensor policy_logits = slice_logits(logits,
+                                              battle_common::kBattleHeadPolicyOffset,
+                                              battle_common::kBattlePolicyActionDim);
+    float total_loss = 0.0f;
+
+    if (train_config.use_actor_critic) {
+        const float value_pred = std::tanh(logits.data[battle_common::kBattleHeadValueOffset]);
+        const float scaled_reward = reward_total * train_config.reward_scale;
+        const float advantage = std::clamp(scaled_reward - value_pred, -3.0f, 3.0f);
+
+        std::vector<float> probs(policy_logits.data.size(), 0.0f);
+        float max_logit = policy_logits.data.empty() ? 0.0f : policy_logits.data[0];
+        for (size_t i = 1; i < policy_logits.data.size(); ++i) {
+            max_logit = std::max(max_logit, policy_logits.data[i]);
+        }
+        float denom = 0.0f;
+        for (size_t i = 0; i < policy_logits.data.size(); ++i) {
+            probs[i] = std::exp(policy_logits.data[i] - max_logit);
+            denom += probs[i];
+        }
+        denom = std::max(1e-7f, denom);
+        for (float& p : probs) {
+            p /= denom;
+        }
+
+        if (!probs.empty()) {
+            const size_t safe_action = std::min<size_t>(action_target, probs.size() - 1);
+            const float selected_prob = std::max(1e-7f, probs[safe_action]);
+            total_loss += -train_config.policy_loss_weight * advantage * std::log(selected_prob) * action_weight;
+
+            for (size_t i = 0; i < probs.size(); ++i) {
+                const float one_hot = i == safe_action ? 1.0f : 0.0f;
+                grad_out.data[battle_common::kBattleHeadPolicyOffset + i] =
+                    train_config.policy_loss_weight * advantage * (probs[i] - one_hot) * action_weight;
+            }
+        }
+
+        float entropy = 0.0f;
+        for (float p : probs) {
+            entropy += -p * std::log(std::max(1e-7f, p));
+        }
+        total_loss += -train_config.entropy_coeff * entropy;
+    } else {
+        const Tensor grad_policy = grad_cross_entropy_advanced(policy_logits,
+                                                               action_target,
+                                                               train_config.label_smoothing,
+                                                               action_weight);
+        for (size_t i = 0; i < grad_policy.data.size(); ++i) {
+            grad_out.data[battle_common::kBattleHeadPolicyOffset + i] = grad_policy.data[i];
+        }
+
+        total_loss += cross_entropy_advanced(policy_logits,
+                                             action_target,
+                                             train_config.label_smoothing,
+                                             action_weight);
+    }
+
+    const uint32_t goal_target = strategic_goal_from_action(action_target);
+    const Tensor goal_logits = slice_logits(logits,
+                                            battle_common::kBattleHeadStrategicOffset,
+                                            battle_common::kBattleStrategicGoalDim);
+    const Tensor grad_goal = grad_cross_entropy_advanced(goal_logits, goal_target, 0.0f, 0.20f);
+    for (size_t i = 0; i < grad_goal.data.size(); ++i) {
+        grad_out.data[battle_common::kBattleHeadStrategicOffset + i] = grad_goal.data[i];
+    }
+    total_loss += cross_entropy_advanced(goal_logits, goal_target, 0.0f, 0.20f);
+
+    const uint32_t target_bucket = target_bucket_from_features(sample);
+    const Tensor target_logits = slice_logits(logits,
+                                              battle_common::kBattleHeadTargetBucketOffset,
+                                              battle_common::kBattleTacticalTargetBucketDim);
+    const Tensor grad_target = grad_cross_entropy_advanced(target_logits, target_bucket, 0.0f, 0.12f);
+    for (size_t i = 0; i < grad_target.data.size(); ++i) {
+        grad_out.data[battle_common::kBattleHeadTargetBucketOffset + i] = grad_target.data[i];
+    }
+    total_loss += cross_entropy_advanced(target_logits, target_bucket, 0.0f, 0.12f);
+
+    const uint32_t commitment_bucket = commitment_bucket_from_features(sample);
+    const Tensor commitment_logits = slice_logits(logits,
+                                                  battle_common::kBattleHeadCommitmentOffset,
+                                                  battle_common::kBattleCommitmentBucketDim);
+    const Tensor grad_commit = grad_cross_entropy_advanced(commitment_logits, commitment_bucket, 0.0f, 0.12f);
+    for (size_t i = 0; i < grad_commit.data.size(); ++i) {
+        grad_out.data[battle_common::kBattleHeadCommitmentOffset + i] = grad_commit.data[i];
+    }
+    total_loss += cross_entropy_advanced(commitment_logits, commitment_bucket, 0.0f, 0.12f);
+
+    const uint32_t alloc_bucket = allocation_bucket_from_features(sample);
+    const Tensor alloc_logits = slice_logits(logits,
+                                             battle_common::kBattleHeadAllocationOffset,
+                                             battle_common::kBattleAllocationBucketDim);
+    const Tensor grad_alloc = grad_cross_entropy_advanced(alloc_logits, alloc_bucket, 0.0f, 0.12f);
+    for (size_t i = 0; i < grad_alloc.data.size(); ++i) {
+        grad_out.data[battle_common::kBattleHeadAllocationOffset + i] = grad_alloc.data[i];
+    }
+    total_loss += cross_entropy_advanced(alloc_logits, alloc_bucket, 0.0f, 0.12f);
+
+    const uint32_t opponent_target = opponent_action_target_from_features(sample);
+    const Tensor opponent_logits = slice_logits(logits,
+                                                battle_common::kBattleHeadOpponentOffset,
+                                                battle_common::kBattleOpponentActionDim);
+    const Tensor grad_opp = grad_cross_entropy_advanced(opponent_logits, opponent_target, 0.02f, 0.18f);
+    for (size_t i = 0; i < grad_opp.data.size(); ++i) {
+        grad_out.data[battle_common::kBattleHeadOpponentOffset + i] = grad_opp.data[i];
+    }
+    total_loss += cross_entropy_advanced(opponent_logits, opponent_target, 0.02f, 0.18f);
+
+    if (battle_common::kBattleHeadValueOffset < logits.data.size()) {
+        const float value_target = train_config.use_actor_critic
+            ? std::clamp(outcome_target * train_config.reward_scale, -1.0f, 1.0f)
+            : value_target_from_action(action_target);
+        const float pred = std::tanh(logits.data[battle_common::kBattleHeadValueOffset]);
+        const float diff = pred - value_target;
+        total_loss += train_config.value_loss_weight * diff * diff;
+        const float dtanh = 1.0f - pred * pred;
+        grad_out.data[battle_common::kBattleHeadValueOffset] = 2.0f * train_config.value_loss_weight * diff * dtanh;
+    }
+
+    return total_loss;
+}
+
 Metrics evaluate_validation(Model& model,
                             BattleBatchLoader& loader,
                             const TrainConfig& train_config,
@@ -167,19 +715,27 @@ Metrics evaluate_validation(Model& model,
     Metrics m;
     Tensor inputs({1, battle_common::kBattleInputDim}, 0.0f);
     std::vector<uint32_t> targets;
-    while (loader.next(inputs, targets)) {
+    std::vector<float> outcomes;
+    std::vector<float> rewards;
+    while (loader.next(inputs, targets, outcomes, rewards)) {
         for (size_t i = 0; i < targets.size(); ++i) {
             Tensor sample({1, battle_common::kBattleInputDim}, 0.0f);
             const float* src = &inputs.data[i * battle_common::kBattleInputDim];
             std::copy(src, src + battle_common::kBattleInputDim, sample.data.begin());
 
             Tensor logits = model.forward(sample);
+            Tensor policy_logits = slice_logits(logits,
+                                                battle_common::kBattleHeadPolicyOffset,
+                                                battle_common::kBattlePolicyActionDim);
             const uint32_t target = targets[i];
             const float weight = target < class_weights.size() ? class_weights[target] : 1.0f;
-            m.loss += cross_entropy_advanced(logits, target, train_config.label_smoothing, weight);
-            m.top1 += top_k_hit(logits, target, 1) ? 1.0f : 0.0f;
-            m.top3 += top_k_hit(logits, target, 3) ? 1.0f : 0.0f;
-            m.top5 += top_k_hit(logits, target, 5) ? 1.0f : 0.0f;
+            Tensor throwaway_grad({1, battle_common::kBattleOutputDim}, 0.0f);
+            const float outcome = i < outcomes.size() ? outcomes[i] : 0.0f;
+            const float reward = i < rewards.size() ? rewards[i] : outcome;
+            m.loss += append_multitask_loss_and_grad(logits, sample, target, outcome, reward, train_config, weight, throwaway_grad);
+            m.top1 += top_k_hit(policy_logits, target, 1) ? 1.0f : 0.0f;
+            m.top3 += top_k_hit(policy_logits, target, 3) ? 1.0f : 0.0f;
+            m.top5 += top_k_hit(policy_logits, target, 5) ? 1.0f : 0.0f;
             m.count += 1;
         }
     }
@@ -305,6 +861,55 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    const std::string benchmark_bank_path = cli.benchmark_bank_path.empty()
+        ? (cli.data_dir + "/scenario_bank")
+        : cli.benchmark_bank_path;
+    const std::string benchmark_report_path = cli.benchmark_report_path.empty()
+        ? (cli.log_dir + "/scenario_benchmark.json")
+        : cli.benchmark_report_path;
+
+    if (cli.benchmark_only) {
+        Model benchmark_model(battle_common::kBattleInputDim, battle_common::kBattleOutputDim, model_config);
+        benchmark_model.set_training(false);
+        benchmark_model.set_inference_only(true);
+
+        ModelFileInfo file_info;
+        const std::string benchmark_model_path = cli.benchmark_model_path.empty()
+            ? cli.resume_path
+            : cli.benchmark_model_path;
+        if (!benchmark_model.load_state(benchmark_model_path,
+                                        battle_common::kBattleInputDim,
+                                        battle_common::kBattleOutputDim,
+                                        &file_info)) {
+            logging::log_event(logging::Level::Error, "benchmark_model_load_failed", {
+                {"path", benchmark_model_path}
+            });
+            return 1;
+        }
+
+        std::string benchmark_error;
+        if (!run_scenario_bank_benchmark(benchmark_bank_path,
+                                         benchmark_report_path,
+                                         benchmark_model,
+                                         model_config,
+                                         &benchmark_error)) {
+            logging::log_event(logging::Level::Error, "benchmark_bank_failed", {
+                {"error", benchmark_error},
+                {"bank_path", benchmark_bank_path},
+                {"report_path", benchmark_report_path}
+            });
+            return 1;
+        }
+
+        logging::log_event(logging::Level::Info, "benchmark_bank_complete", {
+            {"bank_path", benchmark_bank_path},
+            {"report_path", benchmark_report_path}
+        });
+        std::cout << "benchmark report written: " << benchmark_report_path << "\n";
+        logging::flush();
+        return 0;
+    }
+
     std::vector<BattleSample> samples;
     BattleDatasetConfig dataset_cfg = make_battle_dataset_config(cli.data_dir);
     try {
@@ -335,11 +940,17 @@ int main(int argc, char** argv) {
 
     std::vector<std::array<float, battle_common::kBattleInputDim>> features;
     std::vector<uint32_t> actions;
+    std::vector<float> outcomes;
+    std::vector<float> rewards;
     features.reserve(samples.size());
     actions.reserve(samples.size());
+    outcomes.reserve(samples.size());
+    rewards.reserve(samples.size());
     for (const BattleSample& s : samples) {
         features.push_back(s.features);
         actions.push_back(s.action);
+        outcomes.push_back(s.outcome);
+        rewards.push_back(s.reward_total);
     }
 
     const size_t total = samples.size();
@@ -380,8 +991,8 @@ int main(int argc, char** argv) {
         }
     }
 
-    BattleBatchLoader train_loader(&features, &actions, train_indices, train_config.batch_size, true, 1234);
-    BattleBatchLoader val_loader(&features, &actions, val_indices, train_config.batch_size, false, 5678);
+    BattleBatchLoader train_loader(&features, &actions, &outcomes, &rewards, train_indices, train_config.batch_size, true, 1234);
+    BattleBatchLoader val_loader(&features, &actions, &outcomes, &rewards, val_indices, train_config.batch_size, false, 5678);
     std::vector<float> class_weights = load_battle_class_weights(train_config);
 
     const int omp_threads = std::max(1, omp_get_max_threads());
@@ -417,7 +1028,9 @@ int main(int argc, char** argv) {
 
         Tensor batch_inputs({1, battle_common::kBattleInputDim}, 0.0f);
         std::vector<uint32_t> targets;
-        while (train_loader.next(batch_inputs, targets)) {
+        std::vector<float> batch_outcomes;
+        std::vector<float> batch_rewards;
+        while (train_loader.next(batch_inputs, targets, batch_outcomes, batch_rewards)) {
             if (g_shutdown_requested.load()) {
                 break;
             }
@@ -440,7 +1053,7 @@ int main(int argc, char** argv) {
             std::vector<float> thread_top5(static_cast<size_t>(omp_threads), 0.0f);
             std::vector<size_t> thread_count(static_cast<size_t>(omp_threads), 0);
 
-#pragma omp parallel default(none) shared(batch, batch_inputs, targets, class_weights, train_config, worker_models, thread_grad_sums, thread_loss, thread_top1, thread_top3, thread_top5, thread_count)
+#pragma omp parallel default(none) shared(batch, batch_inputs, targets, batch_outcomes, batch_rewards, class_weights, train_config, worker_models, thread_grad_sums, thread_loss, thread_top1, thread_top3, thread_top5, thread_count)
             {
                 const int tid = omp_get_thread_num();
                 Model& local_model = worker_models[static_cast<size_t>(tid)];
@@ -455,17 +1068,22 @@ int main(int argc, char** argv) {
 
                     local_model.zero_grad();
                     Tensor logits = local_model.forward(sample);
+                    Tensor policy_logits = slice_logits(logits,
+                                                        battle_common::kBattleHeadPolicyOffset,
+                                                        battle_common::kBattlePolicyActionDim);
                     const uint32_t target = targets[i];
                     const float weight = target < class_weights.size() ? class_weights[target] : 1.0f;
+                    const float outcome = i < batch_outcomes.size() ? batch_outcomes[i] : 0.0f;
+                    const float reward = i < batch_rewards.size() ? batch_rewards[i] : outcome;
 
+                    Tensor grad(logits.shape, 0.0f);
                     thread_loss[static_cast<size_t>(tid)] +=
-                        cross_entropy_advanced(logits, target, train_config.label_smoothing, weight);
-                    thread_top1[static_cast<size_t>(tid)] += top_k_hit(logits, target, 1) ? 1.0f : 0.0f;
-                    thread_top3[static_cast<size_t>(tid)] += top_k_hit(logits, target, 3) ? 1.0f : 0.0f;
-                    thread_top5[static_cast<size_t>(tid)] += top_k_hit(logits, target, 5) ? 1.0f : 0.0f;
+                        append_multitask_loss_and_grad(logits, sample, target, outcome, reward, train_config, weight, grad);
+                    thread_top1[static_cast<size_t>(tid)] += top_k_hit(policy_logits, target, 1) ? 1.0f : 0.0f;
+                    thread_top3[static_cast<size_t>(tid)] += top_k_hit(policy_logits, target, 3) ? 1.0f : 0.0f;
+                    thread_top5[static_cast<size_t>(tid)] += top_k_hit(policy_logits, target, 5) ? 1.0f : 0.0f;
                     thread_count[static_cast<size_t>(tid)] += 1;
 
-                    Tensor grad = grad_cross_entropy_advanced(logits, target, train_config.label_smoothing, weight);
                     local_model.backward(grad);
                     local_model.gradients_to_vector(grad_vec);
                     for (size_t g = 0; g < grad_accum.size(); ++g) {
@@ -558,5 +1176,29 @@ int main(int argc, char** argv) {
     }
 
     logging::flush();
+
+    if (!cli.benchmark_bank_path.empty()) {
+        std::string benchmark_error;
+        if (!run_scenario_bank_benchmark(benchmark_bank_path,
+                                         benchmark_report_path,
+                                         model,
+                                         model_config,
+                                         &benchmark_error)) {
+            logging::log_event(logging::Level::Error, "benchmark_bank_failed", {
+                {"error", benchmark_error},
+                {"bank_path", benchmark_bank_path},
+                {"report_path", benchmark_report_path}
+            });
+            return 1;
+        }
+
+        logging::log_event(logging::Level::Info, "benchmark_bank_complete", {
+            {"bank_path", benchmark_bank_path},
+            {"report_path", benchmark_report_path}
+        });
+        std::cout << "benchmark report written: " << benchmark_report_path << "\n";
+        logging::flush();
+    }
+
     return 0;
 }
