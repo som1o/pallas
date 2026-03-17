@@ -85,13 +85,13 @@ std::shared_ptr<Model> create_model_instance(const std::string& model_path) {
         return nullptr;
     }
 
-    size_t input_dim = 0;
-    size_t output_dim = 0;
-    ModelConfig cfg;
-    std::string inspect_error;
-    if (!inspect_model_state(model_path, &input_dim, &output_dim, &cfg, &inspect_error)) {
-        throw std::runtime_error("failed to inspect model state '" + model_path + "': " + inspect_error);
+    const ModelStateInspection inspection = inspect_model_state(model_path);
+    if (!inspection.ok) {
+        throw std::runtime_error("failed to inspect model state '" + model_path + "': " + inspection.error_message);
     }
+    const size_t input_dim = inspection.input_dim;
+    const size_t output_dim = inspection.output_dim;
+    ModelConfig cfg = inspection.model_config;
     if (input_dim == 0 || output_dim == 0) {
         throw std::runtime_error("invalid model architecture in state file: " + model_path);
     }
@@ -622,6 +622,7 @@ bool load_scenario_config(const std::string& path, ScenarioConfig* out, std::str
 
 sim::World world_from_scenario(const ScenarioConfig& config) {
     sim::World world(config.seed, config.tick_seconds);
+    world.reserve_countries(config.countries.size());
 
     sim::GridMap map(config.map_width, config.map_height);
     if (config.map_cells.size() == static_cast<size_t>(config.map_width) * config.map_height) {

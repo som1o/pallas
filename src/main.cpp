@@ -788,15 +788,14 @@ void append_model_zoo_manifest(const std::string& zoo_dir, const ModelTrainingMe
 }
 
 void print_model_inspection(const std::string& path) {
-    size_t in_dim = 0;
-    size_t out_dim = 0;
-    ModelConfig cfg;
-    std::string err;
-
-    if (!inspect_model_state(path, &in_dim, &out_dim, &cfg, &err)) {
-        std::cerr << "inspect failed: " << err << "\n";
+    const ModelStateInspection inspection = inspect_model_state(path);
+    if (!inspection.ok) {
+        std::cerr << "inspect failed: " << inspection.error_message << "\n";
         return;
     }
+
+    const size_t in_dim = inspection.input_dim;
+    const size_t out_dim = inspection.output_dim;
 
     std::cout << "path: " << path << "\n";
     std::cout << "input_dim: " << in_dim << "\n";

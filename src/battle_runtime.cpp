@@ -338,16 +338,17 @@ std::shared_ptr<Model> load_configured_model(const std::string& state_path, std:
         return nullptr;
     }
 
-    size_t input_dim = 0;
-    size_t output_dim = 0;
-    ModelConfig config;
-    std::string inspect_error;
-    if (!inspect_model_state(state_path, &input_dim, &output_dim, &config, &inspect_error)) {
+    const ModelStateInspection inspection = inspect_model_state(state_path);
+    if (!inspection.ok) {
         if (error_message != nullptr) {
-            *error_message = "inspect failed for '" + state_path + "': " + inspect_error;
+            *error_message = "inspect failed for '" + state_path + "': " + inspection.error_message;
         }
         return nullptr;
     }
+
+    const size_t input_dim = inspection.input_dim;
+    const size_t output_dim = inspection.output_dim;
+    ModelConfig config = inspection.model_config;
 
     if (input_dim == 0 || output_dim == 0) {
         if (error_message != nullptr) {
@@ -1406,16 +1407,17 @@ bool ModelManager::replace_model_weights(const std::string& model_name,
             continue;
         }
         try {
-            size_t file_in = 0;
-            size_t file_out = 0;
-            ModelConfig file_cfg;
-            std::string inspect_error;
-            if (!inspect_model_state(state_path, &file_in, &file_out, &file_cfg, &inspect_error)) {
+            const ModelStateInspection inspection = inspect_model_state(state_path);
+            if (!inspection.ok) {
                 if (error_message != nullptr) {
-                    *error_message = inspect_error;
+                    *error_message = inspection.error_message;
                 }
                 return false;
             }
+
+            const size_t file_in = inspection.input_dim;
+            const size_t file_out = inspection.output_dim;
+            ModelConfig file_cfg = inspection.model_config;
 
             if (file_in == 0 || file_out == 0) {
                 if (error_message != nullptr) {
@@ -2217,7 +2219,7 @@ bool ReplayReader::read_frame_from_stream(std::istream& in, ReplayFrame* frame) 
                 return false;
             }
         } else {
-            envelope.decision.force_commitment = 0.5f;
+            envelope.decision.force_commitment = model_tuning::kDefaultForceCommitment;
             if (!read_string_stream(&envelope.decision.terms.type) ||
                 !read_string_stream(&envelope.decision.terms.details)) {
                 return false;

@@ -517,7 +517,15 @@ const GridMap& World::map() const {
     return map_;
 }
 
+void World::reserve_countries(size_t count) {
+    countries_.reserve(count);
+    country_index_by_id_.reserve(count);
+}
+
 void World::add_country(const Country& country) {
+    if (countries_structure_locked_) {
+        throw std::logic_error("cannot add countries after world simulation has started; reserve and add all countries during setup");
+    }
     countries_.push_back(country);
     country_index_by_id_[country.id] = countries_.size() - 1;
 }
@@ -539,6 +547,7 @@ void World::schedule_event(std::unique_ptr<Event> event, uint64_t execute_at_tic
 }
 
 void World::run_tick() {
+    countries_structure_locked_ = true;
     ensure_map_state_buffers();
     while (!events_.empty() && events_.top().tick <= current_tick_) {
         ScheduledEvent item = events_.top();

@@ -130,7 +130,7 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    battle::BattleServer server(&engine, web_root, port);
+    battle::BattleServer server(engine, web_root, port);
 
     std::cout << "Battle server listening on http://127.0.0.1:" << port << std::endl;
     std::cout << "Use controls for turn-based step or continuous mode. Replay log: " << replay_path << std::endl;

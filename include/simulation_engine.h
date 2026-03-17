@@ -339,6 +339,7 @@ public:
     GridMap& mutable_map();
     const GridMap& map() const;
 
+    void reserve_countries(size_t count);
     void add_country(const Country& country);
     std::vector<Country>& mutable_countries();
     const std::vector<Country>& countries() const;
@@ -461,6 +462,7 @@ private:
     std::unordered_map<uint32_t, NegotiationSession> negotiation_sessions_;
     std::unordered_map<uint16_t, std::vector<uint64_t>> betrayal_history_by_betrayer_;
     uint16_t next_coalition_id_ = 1;
+    bool countries_structure_locked_ = false;
 };
 
 }  // namespace sim

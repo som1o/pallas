@@ -21,7 +21,7 @@ void erase_id(std::vector<uint16_t>* values, uint16_t id) {
     values->erase(std::remove(values->begin(), values->end(), id), values->end());
 }
 
-std::string trim_copy(const std::string& text) {
+std::string trim_copy(std::string_view text) {
     size_t begin = 0;
     while (begin < text.size() && std::isspace(static_cast<unsigned char>(text[begin]))) {
         ++begin;
@@ -30,7 +30,11 @@ std::string trim_copy(const std::string& text) {
     while (end > begin && std::isspace(static_cast<unsigned char>(text[end - 1]))) {
         --end;
     }
-    return text.substr(begin, end - begin);
+    return std::string(text.substr(begin, end - begin));
+}
+
+std::string trim_copy(const std::string& text) {
+    return trim_copy(std::string_view(text));
 }
 
 std::string to_lower_ascii(std::string text) {

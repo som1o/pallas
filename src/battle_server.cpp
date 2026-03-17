@@ -9,6 +9,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <charconv>
 #include <cerrno>
 #include <chrono>
 #include <cstdlib>
@@ -29,6 +30,11 @@ constexpr size_t kMaxHeaderBytes = 64 * 1024;
 constexpr size_t kDefaultMaxUploadBytes = 10 * 1024 * 1024;
 constexpr int kSocketTimeoutSec = 5;
 
+std::string env_or_empty(const char* var_name) {
+    const char* value = std::getenv(var_name);
+    return value == nullptr ? std::string() : std::string(value);
+}
+
 std::string status_text(int status) {
     switch (status) {
         case 200: return "OK";
@@ -44,24 +50,71 @@ std::string status_text(int status) {
     }
 }
 
-std::string query_value(const std::string& path, const std::string& key) {
+std::string_view query_value_view(std::string_view path, std::string_view key) {
     const size_t q = path.find('?');
-    if (q == std::string::npos) {
-        return "";
+    if (q == std::string::npos || q + 1 >= path.size()) {
+        return {};
     }
-    const std::string query = path.substr(q + 1);
-    std::stringstream ss(query);
-    std::string part;
-    while (std::getline(ss, part, '&')) {
+
+    const std::string_view query = path.substr(q + 1);
+    size_t pos = 0;
+    while (pos <= query.size()) {
+        const size_t next = query.find('&', pos);
+        const std::string_view part = query.substr(pos, next == std::string::npos ? std::string_view::npos : next - pos);
         const size_t eq = part.find('=');
-        if (eq == std::string::npos) {
-            continue;
-        }
-        if (part.substr(0, eq) == key) {
+        if (eq != std::string::npos && part.substr(0, eq) == key) {
             return part.substr(eq + 1);
         }
+        if (next == std::string::npos) {
+            break;
+        }
+        pos = next + 1;
     }
-    return "";
+    return {};
+}
+
+std::string query_value(const std::string& path, const std::string& key) {
+    const std::string_view value = query_value_view(path, key);
+    if (value.empty()) {
+        return "";
+    }
+    return std::string(value);
+}
+
+template <typename UInt>
+bool parse_unsigned(std::string_view text, UInt* out) {
+    if (out == nullptr || text.empty()) {
+        return false;
+    }
+    UInt value = 0;
+    const auto parsed = std::from_chars(text.data(), text.data() + text.size(), value);
+    if (parsed.ec != std::errc() || parsed.ptr != text.data() + text.size()) {
+        return false;
+    }
+    *out = value;
+    return true;
+}
+
+bool parse_double_value(std::string_view text, double* out) {
+    if (out == nullptr || text.empty()) {
+        return false;
+    }
+    double value = 0.0;
+    const auto parsed = std::from_chars(text.data(), text.data() + text.size(), value);
+    if (parsed.ec == std::errc() && parsed.ptr == text.data() + text.size()) {
+        *out = value;
+        return true;
+    }
+
+    std::string copy(text);
+    char* end_ptr = nullptr;
+    errno = 0;
+    const double fallback = std::strtod(copy.c_str(), &end_ptr);
+    if (errno != 0 || end_ptr != copy.c_str() + copy.size()) {
+        return false;
+    }
+    *out = fallback;
+    return true;
 }
 
 std::string url_decode(std::string_view encoded) {
@@ -95,13 +148,19 @@ std::string url_decode(std::string_view encoded) {
 
 std::vector<std::string> split_csv(const std::string& text) {
     std::vector<std::string> out;
-    std::stringstream ss(text);
-    std::string token;
-    while (std::getline(ss, token, ',')) {
+    const std::string_view view(text);
+    size_t pos = 0;
+    while (pos <= view.size()) {
+        const size_t next = view.find(',', pos);
+        const std::string_view token = view.substr(pos, next == std::string::npos ? std::string_view::npos : next - pos);
         const std::string trimmed = pallas::util::trim_copy(token);
         if (!trimmed.empty()) {
             out.push_back(trimmed);
         }
+        if (next == std::string::npos) {
+            break;
+        }
+        pos = next + 1;
     }
     return out;
 }
@@ -112,6 +171,30 @@ std::string strip_query(const std::string& path) {
         return path;
     }
     return path.substr(0, q);
+}
+
+bool parse_request_line(std::string_view line, std::string* method, std::string* path, std::string* version) {
+    if (method == nullptr || path == nullptr || version == nullptr) {
+        return false;
+    }
+
+    const size_t sp1 = line.find(' ');
+    if (sp1 == std::string_view::npos) {
+        return false;
+    }
+    const size_t sp2 = line.find(' ', sp1 + 1);
+    if (sp2 == std::string_view::npos) {
+        return false;
+    }
+
+    *method = std::string(line.substr(0, sp1));
+    *path = std::string(line.substr(sp1 + 1, sp2 - sp1 - 1));
+    *version = std::string(line.substr(sp2 + 1));
+    return !method->empty() && !path->empty() && !version->empty();
+}
+
+bool has_suffix(std::string_view text, std::string_view suffix) {
+    return text.size() >= suffix.size() && text.substr(text.size() - suffix.size()) == suffix;
 }
 
 std::string json_string_array(const std::vector<std::string>& values) {
@@ -145,15 +228,11 @@ size_t parse_size_env(const char* var_name, size_t fallback) {
 
 }  // namespace
 
-BattleServer::BattleServer(BattleEngine* engine, std::string web_root, uint16_t port)
+BattleServer::BattleServer(BattleEngine& engine, std::string web_root, uint16_t port)
     : engine_(engine),
       web_root_(std::move(web_root)),
-      allowed_origin_(std::getenv("PALLAS_ALLOWED_ORIGIN") == nullptr
-                          ? ""
-                          : std::string(std::getenv("PALLAS_ALLOWED_ORIGIN"))),
-      control_token_(std::getenv("PALLAS_CONTROL_TOKEN") == nullptr
-                         ? ""
-                         : std::string(std::getenv("PALLAS_CONTROL_TOKEN"))),
+    allowed_origin_(env_or_empty("PALLAS_ALLOWED_ORIGIN")),
+    control_token_(env_or_empty("PALLAS_CONTROL_TOKEN")),
       max_upload_bytes_(parse_size_env("PALLAS_MAX_UPLOAD_BYTES", kDefaultMaxUploadBytes)),
       port_(port) {
     std::error_code ec;
@@ -164,10 +243,6 @@ BattleServer::BattleServer(BattleEngine* engine, std::string web_root, uint16_t 
 }
 
 bool BattleServer::run() {
-    if (engine_ == nullptr) {
-        return false;
-    }
-
     const int server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd < 0) {
         return false;
@@ -260,26 +335,31 @@ void BattleServer::handle_client(int client_fd) const {
 
     size_t content_len = 0;
     if (status == 200 && header_end != std::string::npos) {
-        const std::string header_block = raw_request.substr(0, header_end);
-        std::stringstream header_stream(header_block);
-        std::string request_line;
-        std::getline(header_stream, request_line);
-        if (!request_line.empty() && request_line.back() == '\r') {
-            request_line.pop_back();
-        }
-        std::stringstream req(request_line);
-        req >> method >> path >> version;
-        if (method.empty() || path.empty() || version.empty()) {
+        const std::string_view header_block(raw_request.data(), header_end);
+        const size_t first_line_end = header_block.find("\r\n");
+        const std::string_view request_line =
+            first_line_end == std::string_view::npos ? header_block : header_block.substr(0, first_line_end);
+        if (!parse_request_line(request_line, &method, &path, &version)) {
             status = 400;
         }
 
-        std::string header_line;
-        while (status == 200 && std::getline(header_stream, header_line)) {
-            if (!header_line.empty() && header_line.back() == '\r') {
-                header_line.pop_back();
+        size_t line_start = first_line_end == std::string_view::npos ? header_block.size() : first_line_end + 2;
+        while (status == 200 && line_start <= header_block.size()) {
+            const size_t line_end = header_block.find("\r\n", line_start);
+            const std::string_view header_line =
+                line_end == std::string_view::npos
+                    ? header_block.substr(line_start)
+                    : header_block.substr(line_start, line_end - line_start);
+            if (header_line.empty()) {
+                break;
             }
+
             const size_t colon = header_line.find(':');
             if (colon == std::string::npos) {
+                if (line_end == std::string_view::npos) {
+                    break;
+                }
+                line_start = line_end + 2;
                 continue;
             }
             const std::string key = pallas::util::to_lower_ascii(
@@ -287,9 +367,7 @@ void BattleServer::handle_client(int client_fd) const {
             const std::string value = pallas::util::trim_copy(header_line.substr(colon + 1));
             request_headers[key] = value;
             if (key == "content-length") {
-                try {
-                    content_len = static_cast<size_t>(std::stoull(value));
-                } catch (...) {
+                if (!parse_unsigned<size_t>(std::string_view(value), &content_len)) {
                     status = 400;
                     break;
                 }
@@ -298,6 +376,11 @@ void BattleServer::handle_client(int client_fd) const {
                     break;
                 }
             }
+
+            if (line_end == std::string_view::npos) {
+                break;
+            }
+            line_start = line_end + 2;
         }
 
         if (status == 200) {
@@ -320,11 +403,14 @@ void BattleServer::handle_client(int client_fd) const {
     }
 
     std::vector<std::pair<std::string, std::string>> response_headers;
-    append_cors_headers(request_headers, &response_headers);
+    append_cors_headers(request_headers, response_headers);
 
     std::string response_body;
     if (status == 200) {
-        response_body = handle_request(method, path, request_headers, body, &status, &content_type, &response_headers);
+        RequestResult result = handle_request(method, path, request_headers, body, response_headers);
+        status = result.status;
+        content_type = std::move(result.content_type);
+        response_body = std::move(result.body);
     } else {
         content_type = "application/json";
         if (status == 413) {
@@ -372,7 +458,7 @@ bool BattleServer::is_authorized(const std::unordered_map<std::string, std::stri
         return true;
     }
 
-    const std::string query_token = url_decode(query_value(path, "token"));
+    const std::string query_token = url_decode(query_value_view(path, "token"));
     if (!query_token.empty() && query_token == control_token_) {
         return true;
     }
@@ -384,8 +470,10 @@ bool BattleServer::is_authorized(const std::unordered_map<std::string, std::stri
 
     const auto auth = headers.find("authorization");
     if (auth != headers.end()) {
-        const std::string prefix = "Bearer ";
-        if (auth->second.rfind(prefix, 0) == 0 && auth->second.substr(prefix.size()) == control_token_) {
+        constexpr std::string_view prefix = "Bearer ";
+        const std::string_view auth_value(auth->second);
+        if (auth_value.size() >= prefix.size() && auth_value.substr(0, prefix.size()) == prefix &&
+            auth_value.substr(prefix.size()) == control_token_) {
             return true;
         }
     }
@@ -395,11 +483,7 @@ bool BattleServer::is_authorized(const std::unordered_map<std::string, std::stri
 
 void BattleServer::append_cors_headers(
     const std::unordered_map<std::string, std::string>& headers,
-    std::vector<std::pair<std::string, std::string>>* response_headers) const {
-    if (response_headers == nullptr) {
-        return;
-    }
-
+    std::vector<std::pair<std::string, std::string>>& response_headers) const {
     const auto origin_it = headers.find("origin");
     if (origin_it == headers.end()) {
         return;
@@ -409,26 +493,27 @@ void BattleServer::append_cors_headers(
         return;
     }
 
-    response_headers->push_back({"Vary", "Origin"});
-    response_headers->push_back({"Access-Control-Allow-Origin", origin_it->second});
-    response_headers->push_back({"Access-Control-Allow-Methods", "GET, POST, OPTIONS"});
-    response_headers->push_back({"Access-Control-Allow-Headers", "Content-Type, Authorization, X-Pallas-Token"});
+    response_headers.push_back({"Vary", "Origin"});
+    response_headers.push_back({"Access-Control-Allow-Origin", origin_it->second});
+    response_headers.push_back({"Access-Control-Allow-Methods", "GET, POST, OPTIONS"});
+    response_headers.push_back({"Access-Control-Allow-Headers", "Content-Type, Authorization, X-Pallas-Token"});
 }
 
 std::string BattleServer::content_type_for(const std::string& path) const {
-    if (path.size() >= 5 && path.substr(path.size() - 5) == ".html") {
+    const std::string_view v(path);
+    if (has_suffix(v, ".html")) {
         return "text/html";
     }
-    if (path.size() >= 4 && path.substr(path.size() - 4) == ".css") {
+    if (has_suffix(v, ".css")) {
         return "text/css";
     }
-    if (path.size() >= 3 && path.substr(path.size() - 3) == ".js") {
+    if (has_suffix(v, ".js")) {
         return "application/javascript";
     }
-    if (path.size() >= 5 && path.substr(path.size() - 5) == ".json") {
+    if (has_suffix(v, ".json")) {
         return "application/json";
     }
-    if (path.size() >= 4 && path.substr(path.size() - 4) == ".svg") {
+    if (has_suffix(v, ".svg")) {
         return "image/svg+xml";
     }
     return "text/plain";
@@ -444,252 +529,218 @@ std::string BattleServer::read_text_file(const std::string& path) const {
     return ss.str();
 }
 
-std::string BattleServer::handle_request(const std::string& method,
-                                         const std::string& path,
-                                         const std::unordered_map<std::string, std::string>& headers,
-                                         const std::string& body,
-                                         int* status,
-                                         std::string* content_type,
-                                         std::vector<std::pair<std::string, std::string>>* response_headers) const {
+BattleServer::RequestResult BattleServer::handle_request(
+    const std::string& method,
+    const std::string& path,
+    const std::unordered_map<std::string, std::string>& headers,
+    const std::string& body,
+    std::vector<std::pair<std::string, std::string>>& response_headers) const {
+    RequestResult result;
+
+    auto fail = [&result](int status_code, std::string message) -> RequestResult {
+        result.status = status_code;
+        result.content_type = "application/json";
+        result.body = std::move(message);
+        return result;
+    };
+    auto ok_json = [&result](std::string payload) -> RequestResult {
+        result.status = 200;
+        result.content_type = "application/json";
+        result.body = std::move(payload);
+        return result;
+    };
+
     const std::string clean_path = strip_query(path);
 
     if (method == "OPTIONS") {
-        *status = 204;
-        *content_type = "text/plain";
+        result.status = 204;
+        result.content_type = "text/plain";
         append_cors_headers(headers, response_headers);
-        return "";
+        return result;
     }
 
     if (is_control_endpoint(clean_path)) {
         if (!is_origin_allowed(headers)) {
-            *status = 403;
-            return "{\"error\":\"origin not allowed\"}";
+            return fail(403, "{\"error\":\"origin not allowed\"}");
         }
         if (!is_authorized(headers, path)) {
-            *status = 401;
-            return "{\"error\":\"unauthorized\"}";
+            return fail(401, "{\"error\":\"unauthorized\"}");
         }
     }
 
     if (clean_path == "/api/state") {
         if (method != "GET") {
-            *status = 405;
-            return "{\"error\":\"method not allowed\"}";
+            return fail(405, "{\"error\":\"method not allowed\"}");
         }
-        *status = 200;
-        *content_type = "application/json";
-        return engine_->current_state_json();
+        return ok_json(engine_.current_state_json());
     }
 
     if (clean_path == "/api/control/step") {
         if (method != "POST") {
-            *status = 405;
-            return "{\"error\":\"method not allowed\"}";
+            return fail(405, "{\"error\":\"method not allowed\"}");
         }
         std::string readiness_error;
-        if (!engine_->validate_model_readiness(&readiness_error)) {
-            *status = 400;
-            return "{\"error\":\"" + pallas::util::json_escape(readiness_error) + "\"}";
+        if (!engine_.validate_model_readiness(&readiness_error)) {
+            return fail(400, "{\"error\":\"" + pallas::util::json_escape(readiness_error) + "\"}");
         }
-        engine_->step_once();
-        *status = 200;
-        *content_type = "application/json";
-        return "{\"ok\":true}";
+        engine_.step_once();
+        return ok_json("{\"ok\":true}");
     }
 
     if (clean_path == "/api/control/start") {
         if (method != "POST") {
-            *status = 405;
-            return "{\"error\":\"method not allowed\"}";
+            return fail(405, "{\"error\":\"method not allowed\"}");
         }
         std::string readiness_error;
-        if (!engine_->validate_model_readiness(&readiness_error)) {
-            *status = 400;
-            return "{\"error\":\"" + pallas::util::json_escape(readiness_error) + "\"}";
+        if (!engine_.validate_model_readiness(&readiness_error)) {
+            return fail(400, "{\"error\":\"" + pallas::util::json_escape(readiness_error) + "\"}");
         }
-        engine_->start();
-        *status = 200;
-        *content_type = "application/json";
-        return "{\"ok\":true}";
+        engine_.start();
+        return ok_json("{\"ok\":true}");
     }
 
     if (clean_path == "/api/control/pause") {
         if (method != "POST") {
-            *status = 405;
-            return "{\"error\":\"method not allowed\"}";
+            return fail(405, "{\"error\":\"method not allowed\"}");
         }
-        engine_->pause();
-        *status = 200;
-        *content_type = "application/json";
-        return "{\"ok\":true}";
+        engine_.pause();
+        return ok_json("{\"ok\":true}");
     }
 
     if (clean_path == "/api/control/end") {
         if (method != "POST") {
-            *status = 405;
-            return "{\"error\":\"method not allowed\"}";
+            return fail(405, "{\"error\":\"method not allowed\"}");
         }
-        engine_->end_battle();
-        *status = 200;
-        *content_type = "application/json";
-        return "{\"ok\":true}";
+        engine_.end_battle();
+        return ok_json("{\"ok\":true}");
     }
 
     if (clean_path == "/api/control/reset") {
         if (method != "POST") {
-            *status = 405;
-            return "{\"error\":\"method not allowed\"}";
+            return fail(405, "{\"error\":\"method not allowed\"}");
         }
-        engine_->reset_battle();
-        *status = 200;
-        *content_type = "application/json";
-        return "{\"ok\":true}";
+        engine_.reset_battle();
+        return ok_json("{\"ok\":true}");
     }
 
     if (clean_path == "/api/control/speed") {
         if (method != "POST") {
-            *status = 405;
-            return "{\"error\":\"method not allowed\"}";
+            return fail(405, "{\"error\":\"method not allowed\"}");
         }
-        const std::string value = query_value(path, "ticks_per_second");
+        const std::string_view value = query_value_view(path, "ticks_per_second");
         if (!value.empty()) {
-            try {
-                engine_->set_tick_rate(std::stod(value));
-            } catch (...) {
-                *status = 400;
-                return "{\"error\":\"invalid speed\"}";
+            double ticks = 0.0;
+            if (!parse_double_value(value, &ticks)) {
+                return fail(400, "{\"error\":\"invalid speed\"}");
             }
+            engine_.set_tick_rate(ticks);
         }
-        *status = 200;
-        *content_type = "application/json";
-        return "{\"ok\":true}";
+        return ok_json("{\"ok\":true}");
     }
 
     if (clean_path == "/api/control/duration") {
         if (method != "POST") {
-            *status = 405;
-            return "{\"error\":\"method not allowed\"}";
+            return fail(405, "{\"error\":\"method not allowed\"}");
         }
 
         std::string error;
-        const std::string min_value = query_value(path, "min_seconds");
-        const std::string max_value = query_value(path, "max_seconds");
+        const std::string_view min_value = query_value_view(path, "min_seconds");
+        const std::string_view max_value = query_value_view(path, "max_seconds");
         if (!min_value.empty() || !max_value.empty()) {
             if (min_value.empty() || max_value.empty()) {
-                *status = 400;
-                return "{\"error\":\"min_seconds and max_seconds must be provided together\"}";
+                return fail(400, "{\"error\":\"min_seconds and max_seconds must be provided together\"}");
             }
-            try {
-                const uint64_t min_seconds = static_cast<uint64_t>(std::stoull(min_value));
-                const uint64_t max_seconds = static_cast<uint64_t>(std::stoull(max_value));
-                if (!engine_->set_battle_duration_bounds_seconds(min_seconds, max_seconds, &error)) {
-                    *status = 400;
-                    return "{\"error\":\"" + pallas::util::json_escape(error) + "\"}";
-                }
-            } catch (...) {
-                *status = 400;
-                return "{\"error\":\"invalid min/max duration\"}";
+            uint64_t min_seconds = 0;
+            uint64_t max_seconds = 0;
+            if (!parse_unsigned<uint64_t>(min_value, &min_seconds) ||
+                !parse_unsigned<uint64_t>(max_value, &max_seconds)) {
+                return fail(400, "{\"error\":\"invalid min/max duration\"}");
+            }
+            if (!engine_.set_battle_duration_bounds_seconds(min_seconds, max_seconds, &error)) {
+                return fail(400, "{\"error\":\"" + pallas::util::json_escape(error) + "\"}");
             }
         }
 
-        const std::string value = query_value(path, "seconds");
+        const std::string_view value = query_value_view(path, "seconds");
         if (!value.empty()) {
-            try {
-                const uint64_t seconds = static_cast<uint64_t>(std::stoull(value));
-                if (!engine_->set_battle_duration_seconds(seconds, &error)) {
-                    *status = 400;
-                    return "{\"error\":\"" + pallas::util::json_escape(error) + "\"}";
-                }
-            } catch (...) {
-                *status = 400;
-                return "{\"error\":\"invalid duration\"}";
+            uint64_t seconds = 0;
+            if (!parse_unsigned<uint64_t>(value, &seconds)) {
+                return fail(400, "{\"error\":\"invalid duration\"}");
+            }
+            if (!engine_.set_battle_duration_seconds(seconds, &error)) {
+                return fail(400, "{\"error\":\"" + pallas::util::json_escape(error) + "\"}");
             }
         }
-        *status = 200;
-        *content_type = "application/json";
-        return "{\"ok\":true}";
+        return ok_json("{\"ok\":true}");
     }
 
     if (clean_path == "/api/control/override") {
         if (method != "POST") {
-            *status = 405;
-            return "{\"error\":\"method not allowed\"}";
+            return fail(405, "{\"error\":\"method not allowed\"}");
         }
 
         ManualOverrideCommand command;
-        const std::string actor_value = query_value(path, "actor_country_id");
-        const std::string target_value = query_value(path, "target_country_id");
-        const std::string strategy_value = url_decode(query_value(path, "strategy"));
-        command.terms_type = url_decode(query_value(path, "terms_type"));
-        command.terms_details = url_decode(query_value(path, "terms_details"));
+        const std::string_view actor_value = query_value_view(path, "actor_country_id");
+        const std::string_view target_value = query_value_view(path, "target_country_id");
+        const std::string strategy_value = url_decode(query_value_view(path, "strategy"));
+        command.terms_type = url_decode(query_value_view(path, "terms_type"));
+        command.terms_details = url_decode(query_value_view(path, "terms_details"));
 
         if (actor_value.empty() || strategy_value.empty()) {
-            *status = 400;
-            return "{\"error\":\"actor_country_id and strategy are required\"}";
+            return fail(400, "{\"error\":\"actor_country_id and strategy are required\"}");
         }
 
-        try {
-            command.actor_country_id = static_cast<uint16_t>(std::stoul(actor_value));
-            if (!target_value.empty()) {
-                command.target_country_id = static_cast<uint16_t>(std::stoul(target_value));
+        uint16_t actor_country_id = 0;
+        if (!parse_unsigned<uint16_t>(actor_value, &actor_country_id)) {
+            return fail(400, "{\"error\":\"invalid actor/target country id\"}");
+        }
+        command.actor_country_id = actor_country_id;
+        if (!target_value.empty()) {
+            uint16_t target_country_id = 0;
+            if (!parse_unsigned<uint16_t>(target_value, &target_country_id)) {
+                return fail(400, "{\"error\":\"invalid actor/target country id\"}");
             }
-        } catch (...) {
-            *status = 400;
-            return "{\"error\":\"invalid actor/target country id\"}";
+            command.target_country_id = target_country_id;
         }
 
         const auto parsed = pallas::strategy::strategy_from_string(strategy_value);
         if (!parsed.has_value()) {
-            *status = 400;
-            return "{\"error\":\"unknown strategy\"}";
+            return fail(400, "{\"error\":\"unknown strategy\"}");
         }
         command.strategy = *parsed;
 
         std::string error;
-        if (!engine_->apply_manual_override(command, &error)) {
-            *status = 400;
-            return "{\"error\":\"" + pallas::util::json_escape(error) + "\"}";
+        if (!engine_.apply_manual_override(command, &error)) {
+            return fail(400, "{\"error\":\"" + pallas::util::json_escape(error) + "\"}");
         }
 
-        *status = 200;
-        *content_type = "application/json";
-        return "{\"ok\":true}";
+        return ok_json("{\"ok\":true}");
     }
 
     if (clean_path == "/api/leaderboard") {
         if (method != "GET") {
-            *status = 405;
-            return "{\"error\":\"method not allowed\"}";
+            return fail(405, "{\"error\":\"method not allowed\"}");
         }
-        *status = 200;
-        *content_type = "application/json";
-        return engine_->current_leaderboard_json();
+        return ok_json(engine_.current_leaderboard_json());
     }
 
     if (clean_path == "/api/models") {
         if (method != "GET") {
-            *status = 405;
-            return "{\"error\":\"method not allowed\"}";
+            return fail(405, "{\"error\":\"method not allowed\"}");
         }
-        *status = 200;
-        *content_type = "application/json";
-        return engine_->available_models_json();
+        return ok_json(engine_.available_models_json());
     }
 
     if (clean_path == "/api/diagnostics") {
         if (method != "GET") {
-            *status = 405;
-            return "{\"error\":\"method not allowed\"}";
+            return fail(405, "{\"error\":\"method not allowed\"}");
         }
-        *status = 200;
-        *content_type = "application/json";
-        return engine_->current_diagnostics_json();
+        return ok_json(engine_.current_diagnostics_json());
     }
 
     if (clean_path == "/api/meta") {
         if (method != "GET") {
-            *status = 405;
-            return "{\"error\":\"method not allowed\"}";
+            return fail(405, "{\"error\":\"method not allowed\"}");
         }
 
         std::vector<std::string> strategies;
@@ -731,46 +782,37 @@ std::string BattleServer::handle_request(const std::string& method,
         oss << "\"targeted_strategies\":" << json_string_array(targeted_strategies);
         oss << "}";
 
-        *status = 200;
-        *content_type = "application/json";
-        return oss.str();
+        return ok_json(oss.str());
     }
 
     if (clean_path == "/api/upload-model") {
         if (method != "POST") {
-            *status = 405;
-            return "{\"error\":\"method not allowed\"}";
+            return fail(405, "{\"error\":\"method not allowed\"}");
         }
-        const std::string model_name = url_decode(query_value(path, "name"));
-        const std::string team_name = url_decode(query_value(path, "team"));
-        const std::string country_value = query_value(path, "country_id");
-        const std::string upload_label = url_decode(query_value(path, "label"));
+        const std::string model_name = url_decode(query_value_view(path, "name"));
+        const std::string team_name = url_decode(query_value_view(path, "team"));
+        const std::string_view country_value = query_value_view(path, "country_id");
+        const std::string upload_label = url_decode(query_value_view(path, "label"));
         if (model_name.empty() && team_name.empty() && country_value.empty()) {
-            *status = 400;
-            return "{\"error\":\"missing model name, team, or country_id\"}";
+            return fail(400, "{\"error\":\"missing model name, team, or country_id\"}");
         }
         if (body.empty()) {
-            *status = 400;
-            return "{\"error\":\"empty upload body\"}";
+            return fail(400, "{\"error\":\"empty upload body\"}");
         }
         if (body.size() > max_upload_bytes_) {
-            *status = 413;
-            return "{\"error\":\"payload too large\"}";
+            return fail(413, "{\"error\":\"payload too large\"}");
         }
 
         uint16_t country_id = 0;
         if (!country_value.empty()) {
-            try {
-                country_id = static_cast<uint16_t>(std::stoul(country_value));
-            } catch (...) {
-                *status = 400;
-                return "{\"error\":\"invalid country_id\"}";
+            if (!parse_unsigned<uint16_t>(country_value, &country_id)) {
+                return fail(400, "{\"error\":\"invalid country_id\"}");
             }
         }
 
         std::string error;
         std::string applied_model;
-        if (!engine_->upload_model_binary(model_name, team_name, country_id, upload_label, body, &error, &applied_model)) {
+        if (!engine_.upload_model_binary(model_name, team_name, country_id, upload_label, body, &error, &applied_model)) {
             std::cerr << "upload_model_failed"
                       << " model_name=" << model_name
                       << " team_name=" << team_name
@@ -778,9 +820,7 @@ std::string BattleServer::handle_request(const std::string& method,
                       << " label=" << upload_label
                       << " error=" << error
                       << '\n';
-            *status = 400;
-            *content_type = "application/json";
-            return "{\"error\":\"" + pallas::util::json_escape(error) + "\"}";
+            return fail(400, "{\"error\":\"" + pallas::util::json_escape(error) + "\"}");
         }
         std::cerr << "upload_model_applied"
                   << " model_name=" << model_name
@@ -789,8 +829,6 @@ std::string BattleServer::handle_request(const std::string& method,
                   << " label=" << upload_label
                   << " applied_model=" << applied_model
                   << '\n';
-        *status = 200;
-        *content_type = "application/json";
         std::ostringstream oss;
         oss << "{\"ok\":true,\"applied_model\":\"" << pallas::util::json_escape(applied_model)
             << "\",\"applied_models\":[";
@@ -802,13 +840,11 @@ std::string BattleServer::handle_request(const std::string& method,
             oss << "\"" << pallas::util::json_escape(applied[i]) << "\"";
         }
         oss << "]}";
-        return oss.str();
+        return ok_json(oss.str());
     }
 
     if (method != "GET") {
-        *status = 405;
-        *content_type = "application/json";
-        return "{\"error\":\"method not allowed\"}";
+        return fail(405, "{\"error\":\"method not allowed\"}");
     }
 
     std::string static_path = clean_path;
@@ -824,9 +860,7 @@ std::string BattleServer::handle_request(const std::string& method,
     const std::filesystem::path request_path = canonical_web_root_ / static_path;
     const std::filesystem::path canonical_target = std::filesystem::weakly_canonical(request_path, ec);
     if (ec) {
-        *status = 404;
-        *content_type = "application/json";
-        return "{\"error\":\"not found\"}";
+        return fail(404, "{\"error\":\"not found\"}");
     }
 
     auto root_it = canonical_web_root_.begin();
@@ -836,21 +870,18 @@ std::string BattleServer::handle_request(const std::string& method,
         ++target_it;
     }
     if (root_it != canonical_web_root_.end()) {
-        *status = 403;
-        *content_type = "application/json";
-        return "{\"error\":\"forbidden\"}";
+        return fail(403, "{\"error\":\"forbidden\"}");
     }
 
     const std::string content = read_text_file(canonical_target.string());
-    if (content.empty()) {
-        *status = 404;
-        *content_type = "application/json";
-        return "{\"error\":\"not found\"}";
+    if (content.empty() && !std::filesystem::exists(canonical_target, ec)) {
+        return fail(404, "{\"error\":\"not found\"}");
     }
 
-    *status = 200;
-    *content_type = content_type_for(canonical_target.string());
-    return content;
+    result.status = 200;
+    result.content_type = content_type_for(canonical_target.string());
+    result.body = content;
+    return result;
 }
 
 }  // namespace battle

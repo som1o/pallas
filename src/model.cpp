@@ -3,6 +3,7 @@
 #include "common_utils.h"
 
 #include <algorithm>
+#include <charconv>
 #include <cctype>
 #include <cmath>
 #include <cstdint>
@@ -11,6 +12,7 @@
 #include <limits>
 #include <random>
 #include <sstream>
+#include <string_view>
 #include <stdexcept>
 
 #if __has_include(<nlohmann/json.hpp>)
@@ -22,75 +24,95 @@
 
 namespace {
 
-std::vector<size_t> parse_number_list(const std::string& raw) {
+std::vector<size_t> parse_number_list(std::string_view raw) {
     std::vector<size_t> out;
-    std::string s = raw;
-    for (char& ch : s) {
-        if (ch == '[' || ch == ']' || ch == ',') {
-            ch = ' ';
+    size_t i = 0;
+    while (i < raw.size()) {
+        while (i < raw.size() &&
+               (std::isspace(static_cast<unsigned char>(raw[i])) || raw[i] == '[' || raw[i] == ']' || raw[i] == ',')) {
+            ++i;
         }
-    }
-    std::stringstream ss(s);
-    size_t v = 0;
-    while (ss >> v) {
-        out.push_back(v);
+        if (i >= raw.size()) {
+            break;
+        }
+        size_t j = i;
+        while (j < raw.size() && std::isdigit(static_cast<unsigned char>(raw[j]))) {
+            ++j;
+        }
+        if (j == i) {
+            ++i;
+            continue;
+        }
+
+        size_t value = 0;
+        const char* begin = raw.data() + i;
+        const char* end = raw.data() + j;
+        const auto parsed = std::from_chars(begin, end, value);
+        if (parsed.ec == std::errc()) {
+            out.push_back(value);
+        }
+        i = j;
     }
     return out;
 }
 
 std::string parse_json_string_field(const std::string& content, const std::string& key, const std::string& fallback) {
+    const std::string_view view(content);
     const std::string needle = "\"" + key + "\"";
-    size_t p = content.find(needle);
+    size_t p = view.find(needle);
     if (p == std::string::npos) return fallback;
-    p = content.find(':', p);
+    p = view.find(':', p);
     if (p == std::string::npos) return fallback;
-    size_t q1 = content.find('"', p + 1);
+    size_t q1 = view.find('"', p + 1);
     if (q1 == std::string::npos) return fallback;
-    size_t q2 = content.find('"', q1 + 1);
+    size_t q2 = view.find('"', q1 + 1);
     if (q2 == std::string::npos) return fallback;
-    return content.substr(q1 + 1, q2 - q1 - 1);
+    return std::string(view.substr(q1 + 1, q2 - q1 - 1));
 }
 
 float parse_json_float_field(const std::string& content, const std::string& key, float fallback) {
+    const std::string_view view(content);
     const std::string needle = "\"" + key + "\"";
-    size_t p = content.find(needle);
+    size_t p = view.find(needle);
     if (p == std::string::npos) return fallback;
-    p = content.find(':', p);
+    p = view.find(':', p);
     if (p == std::string::npos) return fallback;
-    size_t start = content.find_first_of("-0123456789.", p + 1);
+    size_t start = view.find_first_of("-0123456789.", p + 1);
     if (start == std::string::npos) return fallback;
     size_t end = start;
-    while (end < content.size() && (std::isdigit(static_cast<unsigned char>(content[end])) || content[end] == '.' || content[end] == '-')) {
+    while (end < view.size() && (std::isdigit(static_cast<unsigned char>(view[end])) || view[end] == '.' || view[end] == '-')) {
         ++end;
     }
     try {
-        return std::stof(content.substr(start, end - start));
+        return std::stof(std::string(view.substr(start, end - start)));
     } catch (...) {
         return fallback;
     }
 }
 
 bool parse_json_bool_field(const std::string& content, const std::string& key, bool fallback) {
+    const std::string_view view(content);
     const std::string needle = "\"" + key + "\"";
-    size_t p = content.find(needle);
+    size_t p = view.find(needle);
     if (p == std::string::npos) return fallback;
-    p = content.find(':', p);
+    p = view.find(':', p);
     if (p == std::string::npos) return fallback;
-    const size_t t = content.find("true", p + 1);
-    const size_t f = content.find("false", p + 1);
+    const size_t t = view.find("true", p + 1);
+    const size_t f = view.find("false", p + 1);
     if (t != std::string::npos && (f == std::string::npos || t < f)) return true;
     if (f != std::string::npos && (t == std::string::npos || f < t)) return false;
     return fallback;
 }
 
 std::vector<size_t> parse_json_hidden(const std::string& content) {
+    const std::string_view view(content);
     const std::string needle = "\"hidden_layers\"";
-    size_t p = content.find(needle);
+    size_t p = view.find(needle);
     if (p == std::string::npos) return {};
-    size_t l = content.find('[', p);
-    size_t r = content.find(']', l);
+    size_t l = view.find('[', p);
+    size_t r = view.find(']', l);
     if (l == std::string::npos || r == std::string::npos) return {};
-    return parse_number_list(content.substr(l, r - l + 1));
+    return parse_number_list(view.substr(l, r - l + 1));
 }
 
 class ReLUActivation final : public Activation {
@@ -195,6 +217,31 @@ std::unique_ptr<Activation> build_activation(const ModelConfig& config) {
 
 constexpr uint32_t kModelMagic = 0x4D4F4458;
 constexpr uint32_t kModelStateVersion = 2;
+
+std::string_view trim_view(std::string_view text) {
+    size_t begin = 0;
+    while (begin < text.size() && std::isspace(static_cast<unsigned char>(text[begin]))) {
+        ++begin;
+    }
+    size_t end = text.size();
+    while (end > begin && std::isspace(static_cast<unsigned char>(text[end - 1]))) {
+        --end;
+    }
+    return text.substr(begin, end - begin);
+}
+
+bool parse_size_t_value(std::string_view text, size_t* out) {
+    if (out == nullptr || text.empty()) {
+        return false;
+    }
+    size_t value = 0;
+    const auto parsed = std::from_chars(text.data(), text.data() + text.size(), value);
+    if (parsed.ec != std::errc() || parsed.ptr != text.data() + text.size()) {
+        return false;
+    }
+    *out = value;
+    return true;
+}
 
 void hash_mix_u64(uint64_t& h, uint64_t value) {
     h ^= value + 0x9e3779b97f4a7c15ULL + (h << 6U) + (h >> 2U);
@@ -316,13 +363,19 @@ ModelConfig load_model_config(const std::string& config_path) {
     std::stringstream lines(content);
     std::string line;
     bool reading_hidden = false;
+    constexpr std::string_view kHiddenPrefix = "hidden_layers:";
+    constexpr std::string_view kActivationPrefix = "activation:";
+    constexpr std::string_view kNormPrefix = "norm:";
+    constexpr std::string_view kDropoutPrefix = "dropout_prob:";
+    constexpr std::string_view kUseDropoutPrefix = "use_dropout:";
+    constexpr std::string_view kLeakyAlphaPrefix = "leaky_relu_alpha:";
     while (std::getline(lines, line)) {
-        std::string s = pallas::util::trim_copy(line);
+        const std::string_view s = trim_view(line);
         if (s.empty() || s[0] == '#') {
             continue;
         }
-        if (s.rfind("hidden_layers:", 0) == 0) {
-            std::string rhs = pallas::util::trim_copy(s.substr(std::string("hidden_layers:").size()));
+        if (s.rfind(kHiddenPrefix, 0) == 0) {
+            std::string_view rhs = trim_view(s.substr(kHiddenPrefix.size()));
             if (!rhs.empty()) {
                 std::vector<size_t> layers = parse_number_list(rhs);
                 if (!layers.empty()) cfg.hidden_layers = layers;
@@ -334,24 +387,24 @@ ModelConfig load_model_config(const std::string& config_path) {
             continue;
         }
         if (reading_hidden && s.rfind("-", 0) == 0) {
-            try {
-                cfg.hidden_layers.push_back(static_cast<size_t>(std::stoul(pallas::util::trim_copy(s.substr(1)))));
-            } catch (...) {
+            size_t layer = 0;
+            if (parse_size_t_value(trim_view(s.substr(1)), &layer)) {
+                cfg.hidden_layers.push_back(layer);
             }
             continue;
         }
         reading_hidden = false;
-        if (s.rfind("activation:", 0) == 0) {
-            cfg.activation = pallas::util::trim_copy(s.substr(std::string("activation:").size()));
-        } else if (s.rfind("norm:", 0) == 0) {
-            cfg.norm = pallas::util::trim_copy(s.substr(std::string("norm:").size()));
-        } else if (s.rfind("dropout_prob:", 0) == 0) {
-            try { cfg.dropout_prob = std::stof(pallas::util::trim_copy(s.substr(std::string("dropout_prob:").size()))); } catch (...) {}
-        } else if (s.rfind("use_dropout:", 0) == 0) {
-            std::string b = pallas::util::trim_copy(s.substr(std::string("use_dropout:").size()));
+        if (s.rfind(kActivationPrefix, 0) == 0) {
+            cfg.activation = std::string(trim_view(s.substr(kActivationPrefix.size())));
+        } else if (s.rfind(kNormPrefix, 0) == 0) {
+            cfg.norm = std::string(trim_view(s.substr(kNormPrefix.size())));
+        } else if (s.rfind(kDropoutPrefix, 0) == 0) {
+            try { cfg.dropout_prob = std::stof(std::string(trim_view(s.substr(kDropoutPrefix.size())))); } catch (...) {}
+        } else if (s.rfind(kUseDropoutPrefix, 0) == 0) {
+            std::string b = std::string(trim_view(s.substr(kUseDropoutPrefix.size())));
             cfg.use_dropout = (b == "true" || b == "1" || b == "yes");
-        } else if (s.rfind("leaky_relu_alpha:", 0) == 0) {
-            try { cfg.leaky_relu_alpha = std::stof(pallas::util::trim_copy(s.substr(std::string("leaky_relu_alpha:").size()))); } catch (...) {}
+        } else if (s.rfind(kLeakyAlphaPrefix, 0) == 0) {
+            try { cfg.leaky_relu_alpha = std::stof(std::string(trim_view(s.substr(kLeakyAlphaPrefix.size())))); } catch (...) {}
         }
     }
 
@@ -394,40 +447,25 @@ bool validate_model_config(const ModelConfig& config, std::string& error_message
     return true;
 }
 
-bool inspect_model_state(const std::string& path,
-                         size_t* input_dim,
-                         size_t* output_dim,
-                         ModelConfig* model_config,
-                         std::string* error_message) {
-    if (input_dim == nullptr || output_dim == nullptr || model_config == nullptr) {
-        if (error_message != nullptr) {
-            *error_message = "inspect_model_state: null output pointers";
-        }
-        return false;
-    }
+ModelStateInspection inspect_model_state(const std::string& path) {
+    ModelStateInspection inspection;
 
     std::ifstream in(path, std::ios::binary);
     if (!in) {
-        if (error_message != nullptr) {
-            *error_message = "inspect_model_state: failed to open file";
-        }
-        return false;
+        inspection.error_message = "inspect_model_state: failed to open file";
+        return inspection;
     }
 
     uint32_t magic = 0;
     uint32_t version = 0;
     uint64_t arch_hash = 0;
     if (!read_binary(in, &magic) || !read_binary(in, &version) || !read_binary(in, &arch_hash)) {
-        if (error_message != nullptr) {
-            *error_message = "inspect_model_state: invalid header";
-        }
-        return false;
+        inspection.error_message = "inspect_model_state: invalid header";
+        return inspection;
     }
     if (magic != kModelMagic || version != kModelStateVersion) {
-        if (error_message != nullptr) {
-            *error_message = "inspect_model_state: unsupported model state format";
-        }
-        return false;
+        inspection.error_message = "inspect_model_state: unsupported model state format";
+        return inspection;
     }
 
     uint64_t timestamp_unix = 0;
@@ -438,38 +476,30 @@ bool inspect_model_state(const std::string& path,
         !read_binary(in, &epoch) ||
         !read_binary(in, &val_loss) ||
         !read_binary(in, &val_top1)) {
-        if (error_message != nullptr) {
-            *error_message = "inspect_model_state: invalid metadata";
-        }
-        return false;
+        inspection.error_message = "inspect_model_state: invalid metadata";
+        return inspection;
     }
     (void)read_string(in);
 
     size_t in_dim = 0;
     size_t out_dim = 0;
     if (!read_binary(in, &in_dim) || !read_binary(in, &out_dim)) {
-        if (error_message != nullptr) {
-            *error_message = "inspect_model_state: missing dimensions";
-        }
-        return false;
+        inspection.error_message = "inspect_model_state: missing dimensions";
+        return inspection;
     }
 
     size_t hidden_count = 0;
     if (!read_binary(in, &hidden_count)) {
-        if (error_message != nullptr) {
-            *error_message = "inspect_model_state: missing hidden layer count";
-        }
-        return false;
+        inspection.error_message = "inspect_model_state: missing hidden layer count";
+        return inspection;
     }
 
     ModelConfig cfg;
     cfg.hidden_layers.assign(hidden_count, 0);
     for (size_t i = 0; i < hidden_count; ++i) {
         if (!read_binary(in, &cfg.hidden_layers[i])) {
-            if (error_message != nullptr) {
-                *error_message = "inspect_model_state: invalid hidden layer data";
-            }
-            return false;
+            inspection.error_message = "inspect_model_state: invalid hidden layer data";
+            return inspection;
         }
     }
 
@@ -478,16 +508,15 @@ bool inspect_model_state(const std::string& path,
     if (!read_binary(in, &cfg.use_dropout) ||
         !read_binary(in, &cfg.dropout_prob) ||
         !read_binary(in, &cfg.leaky_relu_alpha)) {
-        if (error_message != nullptr) {
-            *error_message = "inspect_model_state: invalid model config payload";
-        }
-        return false;
+        inspection.error_message = "inspect_model_state: invalid model config payload";
+        return inspection;
     }
 
-    *input_dim = in_dim;
-    *output_dim = out_dim;
-    *model_config = std::move(cfg);
-    return true;
+    inspection.ok = true;
+    inspection.input_dim = in_dim;
+    inspection.output_dim = out_dim;
+    inspection.model_config = std::move(cfg);
+    return inspection;
 }
 
 Model::Model(size_t input_dim, size_t output_dim, const ModelConfig& config)
@@ -1717,24 +1746,25 @@ ModelDecision Model::decide(const WorldSnapshot& world_snapshot, uint16_t contro
     const size_t commitment_bucket = head_argmax(battle_common::kBattleHeadCommitmentOffset,
                                                  battle_common::kBattleCommitmentBucketDim);
     if (commitment_bucket == 0) {
-        decision.force_commitment = 0.28f;
+        decision.force_commitment = model_tuning::kCommitmentBucketLow;
     } else if (commitment_bucket == 1) {
-        decision.force_commitment = 0.52f;
+        decision.force_commitment = model_tuning::kCommitmentBucketMedium;
     } else {
-        decision.force_commitment = 0.78f;
+        decision.force_commitment = model_tuning::kCommitmentBucketHigh;
     }
     if (opponent_escalating) {
-        decision.force_commitment = std::min(0.92f, decision.force_commitment + 0.08f);
+        decision.force_commitment = std::min(model_tuning::kCommitmentEscalationCap,
+                                             decision.force_commitment + model_tuning::kCommitmentEscalationBoost);
     }
 
     const size_t allocation_bucket = head_argmax(battle_common::kBattleHeadAllocationOffset,
                                                  battle_common::kBattleAllocationBucketDim);
     if (allocation_bucket == 0) {
-        decision.allocation = {0.58f, 0.24f, 0.18f};
+        decision.allocation = model_tuning::kAllocationBucketMilitary;
     } else if (allocation_bucket == 1) {
-        decision.allocation = {0.24f, 0.58f, 0.18f};
+        decision.allocation = model_tuning::kAllocationBucketIndustry;
     } else {
-        decision.allocation = {0.22f, 0.24f, 0.54f};
+        decision.allocation = model_tuning::kAllocationBucketCivilian;
     }
 
     auto populate_action = [&](Strategy strategy, uint16_t* target_country_id, NegotiationTerms* terms) {
@@ -1908,7 +1938,7 @@ ModelDecision Model::decide(const WorldSnapshot& world_snapshot, uint16_t contro
         if (decision.strategy == Strategy::Attack || decision.strategy == Strategy::DeployUnits ||
             decision.strategy == Strategy::CyberAttack || decision.strategy == Strategy::CyberOperation ||
             decision.strategy == Strategy::TacticalNuke || decision.strategy == Strategy::StrategicNuke) {
-            if (intel_opportunity > 0.34f && primary_threat_id != 0) {
+            if (intel_opportunity > model_tuning::kSecondaryIntelOpportunityThresholdAggressive && primary_threat_id != 0) {
                 secondary_strategy = best_of({Strategy::RequestIntel, Strategy::CyberOperation});
             } else if (neighbor_trust_high > 0.54f && best_treaty_target_id != 0) {
                 secondary_strategy = best_of({Strategy::ProposeDefensePact, Strategy::ProposeNonAggression, Strategy::Negotiate});

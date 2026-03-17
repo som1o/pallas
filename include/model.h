@@ -36,6 +36,14 @@ struct ModelConfig {
     float leaky_relu_alpha = 0.01f;
 };
 
+struct ModelStateInspection {
+    bool ok = false;
+    size_t input_dim = 0;
+    size_t output_dim = 0;
+    ModelConfig model_config;
+    std::string error_message;
+};
+
 struct OptimizerConfig {
     std::string type = "adam";
     float beta1 = 0.9f;
@@ -118,13 +126,37 @@ struct ConcurrentAction {
     float commitment = 0.0f;
 };
 
+namespace model_tuning {
+inline constexpr float kDefaultAllocationMilitary = 0.34f;
+inline constexpr float kDefaultAllocationIndustry = 0.33f;
+inline constexpr float kDefaultAllocationCivilian = 0.33f;
+inline constexpr std::array<float, 3> kDefaultAllocation = {
+    kDefaultAllocationMilitary,
+    kDefaultAllocationIndustry,
+    kDefaultAllocationCivilian,
+};
+inline constexpr float kDefaultForceCommitment = 0.5f;
+
+inline constexpr float kCommitmentBucketLow = 0.28f;
+inline constexpr float kCommitmentBucketMedium = 0.52f;
+inline constexpr float kCommitmentBucketHigh = 0.78f;
+inline constexpr float kCommitmentEscalationBoost = 0.08f;
+inline constexpr float kCommitmentEscalationCap = 0.92f;
+
+inline constexpr std::array<float, 3> kAllocationBucketMilitary = {0.58f, 0.24f, 0.18f};
+inline constexpr std::array<float, 3> kAllocationBucketIndustry = {0.24f, 0.58f, 0.18f};
+inline constexpr std::array<float, 3> kAllocationBucketCivilian = {0.22f, 0.24f, 0.54f};
+
+inline constexpr float kSecondaryIntelOpportunityThresholdAggressive = 0.34f;
+}
+
 struct ModelDecision {
     Strategy strategy = Strategy::Defend;
     uint16_t actor_country_id = 0;
     uint16_t target_country_id = 0;
     NegotiationTerms terms;
-    std::array<float, 3> allocation = {0.34f, 0.33f, 0.33f};
-    float force_commitment = 0.5f;
+    std::array<float, 3> allocation = model_tuning::kDefaultAllocation;
+    float force_commitment = model_tuning::kDefaultForceCommitment;
     bool has_secondary_action = false;
     ConcurrentAction secondary_action;
 };
@@ -138,24 +170,25 @@ public:
 
 ModelConfig load_model_config(const std::string& config_path);
 bool validate_model_config(const ModelConfig& config, std::string& error_message);
-bool inspect_model_state(const std::string& path,
-                         size_t* input_dim,
-                         size_t* output_dim,
-                         ModelConfig* model_config,
-                         std::string* error_message);
+ModelStateInspection inspect_model_state(const std::string& path);
 
 class Model {
 public:
     explicit Model(size_t input_dim, size_t output_dim, const ModelConfig& config);
+    Model(const Model&) = delete;
+    Model& operator=(const Model&) = delete;
+    Model(Model&&) noexcept = default;
+    Model& operator=(Model&&) noexcept = default;
+    ~Model() = default;
 
-    Tensor forward(const Tensor& input);
+    [[nodiscard]] Tensor forward(const Tensor& input);
     void backward(const Tensor& grad_output);
     void configure_optimizer(const OptimizerConfig& config);
     void update(float lr);
     void zero_grad();
     void set_training(bool is_training);
     void set_inference_only(bool enabled);
-    bool is_inference_only() const;
+    [[nodiscard]] bool is_inference_only() const;
     void save(const std::string& path, size_t input_dim, size_t output_dim) const;
     void save_state(const std::string& path,
                     size_t input_dim,
@@ -166,11 +199,11 @@ public:
                     size_t input_dim,
                     size_t output_dim,
                     ModelFileInfo* info = nullptr);
-    ModelDecision decide(const WorldSnapshot& world_snapshot, uint16_t controlled_country_id);
-    size_t input_dim() const;
-    size_t output_dim() const;
+    [[nodiscard]] ModelDecision decide(const WorldSnapshot& world_snapshot, uint16_t controlled_country_id);
+    [[nodiscard]] size_t input_dim() const;
+    [[nodiscard]] size_t output_dim() const;
     void copy_parameters_from(const Model& other);
-    size_t gradient_size() const;
+    [[nodiscard]] size_t gradient_size() const;
     void gradients_to_vector(std::vector<float>& out) const;
     void set_gradients_from_vector(const std::vector<float>& values);
 

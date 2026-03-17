@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <fstream>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace pallas {
@@ -15,9 +16,10 @@ bool contains_id(const std::vector<uint16_t>& values, uint16_t id);
 void add_unique_id(std::vector<uint16_t>* values, uint16_t id);
 void erase_id(std::vector<uint16_t>* values, uint16_t id);
 
-std::string trim_copy(const std::string& text);
-std::string to_lower_ascii(std::string text);
-std::string json_escape(const std::string& value);
+[[nodiscard]] std::string trim_copy(const std::string& text);
+[[nodiscard]] std::string trim_copy(std::string_view text);
+[[nodiscard]] std::string to_lower_ascii(std::string text);
+[[nodiscard]] std::string json_escape(const std::string& value);
 
 template <typename T>
 void write_binary(std::ofstream& out, const T& value) {
